@@ -1,0 +1,287 @@
+import type { AppConfig, RepoConfig, TenantConfig } from "./types.js"
+import type { RunStore } from "./storage.js"
+import type { RunService } from "./run-service.js"
+import { createInstallationClient, formatPrivateKey } from "./github-auth.js"
+import { extractCommand, type CommandType } from "./commands.js"
+import { ensureRepoPath } from "./repo.js"
+import { logger } from "./logger.js"
+
+export type GitHubPollEnv = {
+  githubAppId?: number
+  githubPrivateKey?: string
+  githubPollIntervalSec: number
+  githubPollBackfill: boolean
+}
+
+type GitHubClient = Awaited<ReturnType<typeof createInstallationClient>>
+
+export function startGitHubPolling(params: {
+  config: AppConfig
+  store: RunStore
+  runService: RunService
+  env: GitHubPollEnv
+}) {
+  const { config, store, runService, env } = params
+  if (!env.githubAppId || !env.githubPrivateKey) {
+    logger.warn("GitHub polling disabled: missing GITHUB_APP_ID or GITHUB_PRIVATE_KEY")
+    return
+  }
+  if (!Number.isFinite(env.githubPollIntervalSec) || env.githubPollIntervalSec <= 0) {
+    return
+  }
+
+  const intervalMs = Math.max(10000, env.githubPollIntervalSec * 1000)
+  logger.info({ intervalSec: env.githubPollIntervalSec }, "GitHub polling enabled")
+  let running = false
+  const tokenTtlMs = 50 * 60 * 1000
+  const clientCache = new Map<number, { client: GitHubClient; expiresAt: number }>()
+
+  const tick = async () => {
+    if (running) return
+    running = true
+    try {
+      for (const tenant of config.tenants) {
+        if (!tenant.github?.installationId) continue
+        const installationId = tenant.github.installationId
+        const client = await getClient(installationId)
+        if (!client) continue
+
+        for (const repo of tenant.repos) {
+          await pollRepo(tenant, repo, client)
+        }
+      }
+    } catch (error) {
+      logger.error(error, "GitHub polling failed")
+    } finally {
+      running = false
+    }
+  }
+
+  const getClient = async (installationId: number): Promise<GitHubClient | null> => {
+    const cached = clientCache.get(installationId)
+    if (cached && cached.expiresAt > Date.now()) return cached.client
+    const client = await createInstallationClient({
+      appId: env.githubAppId!,
+      privateKey: formatPrivateKey(env.githubPrivateKey!),
+      installationId
+    })
+    clientCache.set(installationId, { client, expiresAt: Date.now() + tokenTtlMs })
+    return client
+  }
+
+  const pollRepo = async (tenant: TenantConfig, repo: RepoConfig, client: GitHubClient) => {
+    const repoFullName = repo.fullName
+    const allowlist = tenant.github?.repoAllowlist
+    if (allowlist && !allowlist.some(r => r.toLowerCase() === repoFullName.toLowerCase())) return
+
+    const [owner, repoName] = repoFullName.split("/")
+    if (!owner || !repoName) return
+
+    const state = await store.getGithubPollState(tenant.id, repoFullName)
+    const response = await client.octokit.issues.listCommentsForRepo({
+      owner,
+      repo: repoName,
+      per_page: 100,
+      sort: "created",
+      direction: "desc"
+    })
+
+    const comments = response.data
+    const newest = comments[0]
+    const newestId = newest?.id ?? null
+    const newestCreatedAt = newest?.created_at ?? null
+
+    if (!state && !env.githubPollBackfill) {
+      await store.updateGithubPollState({
+        tenantId: tenant.id,
+        repoFullName,
+        lastCommentId: newestId,
+        lastCommentCreatedAt: newestCreatedAt
+      })
+      return
+    }
+
+    const lastId = state?.lastCommentId ?? 0
+    const pending = comments
+      .filter(comment => typeof comment.id === "number" && comment.id > lastId)
+      .sort((a, b) => a.id - b.id)
+
+    for (const comment of pending) {
+      try {
+        if (!comment.body) continue
+        if (comment.user?.type === "Bot" || comment.user?.login?.endsWith("[bot]")) continue
+
+        const prefixes = tenant.github?.commandPrefixes ?? ["codex:", "/codex", "@codex"]
+        const command = extractCommand(comment.body, prefixes)
+        if (!command) continue
+
+        const issueNumber = parseIssueNumber(comment.issue_url)
+        if (!issueNumber) continue
+
+        if (command.type === "status") {
+          await postIssueStatus({
+            tenantId: tenant.id,
+            repoFullName,
+            issueNumber,
+            owner,
+            repo: repoName,
+            client,
+            store
+          })
+          continue
+        }
+
+        if (command.type === "pause" || command.type === "resume") {
+          await postControlAck({
+            commandType: command.type,
+            issueNumber,
+            owner,
+            repo: repoName,
+            client
+          })
+          continue
+        }
+
+        const sourceKey = buildSourceKey({
+          installationId: tenant.github?.installationId,
+          repoFullName,
+          issueNumber,
+          commentId: comment.id,
+          commandType: command.type
+        })
+        const existing = await store.getRunBySourceKey(sourceKey)
+        if (existing) continue
+
+        const issue = await client.octokit.issues.get({
+          owner,
+          repo: repoName,
+          issue_number: issueNumber
+        })
+
+        const repoPath = await ensureRepoPath(repo)
+        const prompt = command.type === "reply"
+          ? buildReplyPrompt(issueNumber, command.prompt)
+          : command.prompt
+
+        await runService.createRun({
+          tenantId: tenant.id,
+          repoFullName: repo.fullName,
+          repoPath,
+          sourceKey,
+          prompt,
+          model: repo.model,
+          branchPrefix: repo.branchPrefix,
+          github: {
+            owner,
+            repo: repoName,
+            issueNumber,
+            installationId: tenant.github?.installationId,
+            issueTitle: issue.data.title,
+            issueBody: issue.data.body ?? undefined,
+            triggerCommentId: comment.id
+          }
+        })
+      } catch (error) {
+        logger.error({ err: error, tenantId: tenant.id, repo: repoFullName, commentId: comment.id }, "GitHub polling comment failed")
+      }
+    }
+
+    await store.updateGithubPollState({
+      tenantId: tenant.id,
+      repoFullName,
+      lastCommentId: newestId ?? (state?.lastCommentId ?? null),
+      lastCommentCreatedAt: newestCreatedAt ?? null
+    })
+  }
+
+  const timer = setInterval(() => {
+    tick().catch(error => logger.error(error, "GitHub polling tick failed"))
+  }, intervalMs)
+
+  tick().catch(error => logger.error(error, "GitHub polling tick failed"))
+
+  return () => clearInterval(timer)
+}
+
+function parseIssueNumber(issueUrl?: string | null): number | null {
+  if (!issueUrl) return null
+  const match = issueUrl.match(/\/issues\/(\d+)/)
+  if (!match) return null
+  return parseInt(match[1], 10)
+}
+
+function buildReplyPrompt(issueNumber: number, prompt: string): string {
+  return [
+    `Follow-up command from GitHub issue #${issueNumber}:`,
+    prompt
+  ].join("\n\n")
+}
+
+function buildSourceKey(input: {
+  installationId?: number
+  repoFullName: string
+  issueNumber: number
+  commentId: number
+  commandType: CommandType
+}): string {
+  return [
+    "github",
+    input.installationId ?? "none",
+    input.repoFullName.toLowerCase(),
+    input.issueNumber,
+    input.commentId,
+    input.commandType
+  ].join(":")
+}
+
+async function postIssueStatus(input: {
+  tenantId: string
+  repoFullName: string
+  issueNumber: number
+  owner: string
+  repo: string
+  client: GitHubClient
+  store: RunStore
+}) {
+  const latest = await input.store.getLatestRunForIssue({
+    tenantId: input.tenantId,
+    repoFullName: input.repoFullName,
+    issueNumber: input.issueNumber
+  })
+
+  const body = latest
+    ? [
+      `Agent status for issue #${input.issueNumber}`,
+      `- Run: \`${latest.id}\``,
+      `- Status: \`${latest.status}\``,
+      `- Updated: ${latest.updatedAt}`,
+      latest.prUrl ? `- PR: ${latest.prUrl}` : "- PR: none"
+    ].join("\n")
+    : `No agent run found for issue #${input.issueNumber}.`
+
+  await input.client.octokit.issues.createComment({
+    owner: input.owner,
+    repo: input.repo,
+    issue_number: input.issueNumber,
+    body
+  })
+}
+
+async function postControlAck(input: {
+  commandType: "pause" | "resume"
+  issueNumber: number
+  owner: string
+  repo: string
+  client: GitHubClient
+}) {
+  const body = input.commandType === "pause"
+    ? "Pause command acknowledged. Runtime pause is not implemented yet in this bridge."
+    : "Resume command acknowledged. Runtime resume is not implemented yet in this bridge."
+
+  await input.client.octokit.issues.createComment({
+    owner: input.owner,
+    repo: input.repo,
+    issue_number: input.issueNumber,
+    body
+  })
+}

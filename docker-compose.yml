@@ -1,0 +1,33 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: codex
+      POSTGRES_PASSWORD: codex
+      POSTGRES_DB: codex_bridge
+    ports:
+      - "5432:5432"
+    volumes:
+      - codex_bridge_db:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  bridge:
+    build: .
+    environment:
+      PORT: "8788"
+      ROLE: "all"
+      DATABASE_URL: "postgres://codex:codex@postgres:5432/codex_bridge"
+      REDIS_URL: "redis://redis:6379"
+      CONFIG_PATH: "/app/config/tenants.yaml"
+    ports:
+      - "8788:8788"
+    depends_on:
+      - postgres
+      - redis
+
+volumes:
+  codex_bridge_db:

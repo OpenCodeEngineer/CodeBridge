@@ -1,0 +1,24 @@
+tenants:
+  - id: local
+    name: Local
+    slack:
+      teamId: "T123456"
+      commandPrefixes:
+        - "codex:"
+        - "/codex"
+        - "@codex"
+    github:
+      installationId: 113049547
+      repoAllowlist:
+        - "dzianisv/opencode-manager"
+      commandPrefixes:
+        - "codex:"
+        - "/codex"
+        - "@codex"
+    repos:
+      - fullName: "dzianisv/opencode-manager"
+        path: "/Users/engineer/workspace/opencode-manager-codex"
+        model: "gpt-5.2-codex"
+        baseBranch: "main"
+        branchPrefix: "codex"
+    defaultRepo: "dzianisv/opencode-manager"
