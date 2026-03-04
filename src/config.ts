@@ -1,6 +1,8 @@
 import { config as loadDotenv } from "dotenv"
 import { readFile } from "node:fs/promises"
 import path from "node:path"
+import os from "node:os"
+import { existsSync } from "node:fs"
 import yaml from "js-yaml"
 import { z } from "zod"
 import type { AppConfig } from "./types.js"
@@ -55,16 +57,17 @@ export type EnvConfig = {
   githubPollBackfill: boolean
   codexPath?: string
   codexApiKey?: string
+  codexNotifyToken?: string
   configPath: string
 }
 
 export function loadEnv(): EnvConfig {
   const role = (process.env.ROLE ?? "all") as EnvConfig["role"]
   const port = parseInt(process.env.PORT ?? "8788", 10)
-  const databaseUrl = process.env.DATABASE_URL ?? "sqlite://./data/codex-bridge.db"
+  const databaseUrl = process.env.DATABASE_URL ?? "sqlite://./data/codebridge.db"
   const redisUrl = process.env.REDIS_URL
   const queueMode = parseQueueMode(process.env.QUEUE_MODE, redisUrl)
-  const configPath = process.env.CONFIG_PATH ?? path.join(process.cwd(), "config", "tenants.yaml")
+  const configPath = process.env.CONFIG_PATH ?? resolveDefaultConfigPath()
   const githubAppId = process.env.GITHUB_APP_ID ? parseInt(process.env.GITHUB_APP_ID, 10) : undefined
   const githubPollIntervalSec = parseInt(process.env.GITHUB_POLL_INTERVAL ?? "0", 10)
   const githubPollBackfill = parseBoolean(process.env.GITHUB_POLL_BACKFILL ?? "false")
@@ -85,6 +88,7 @@ export function loadEnv(): EnvConfig {
     githubPollBackfill,
     codexPath: process.env.CODEX_PATH,
     codexApiKey: process.env.CODEX_API_KEY,
+    codexNotifyToken: process.env.CODEBRIDGE_NOTIFY_TOKEN ?? process.env.CODEX_BRIDGE_NOTIFY_TOKEN,
     configPath
   }
 }
@@ -111,4 +115,22 @@ function parseQueueMode(value: string | undefined, redisUrl?: string): "redis" |
   if (normalized === "redis") return "redis"
   if (!redisUrl || redisUrl === "memory") return "memory"
   return "redis"
+}
+
+function resolveDefaultConfigPath(): string {
+  const home = os.homedir()
+  const candidates = [
+    path.join(process.cwd(), "config", "tenants.yaml"),
+    path.join(process.cwd(), "config", "tenants.yml"),
+    path.join(home, ".config", "codebridge", "config.yaml"),
+    path.join(home, ".config", "codebridge", "config.yml"),
+    path.join(home, ".config", "codex-bridge", "config.yaml"),
+    path.join(home, ".config", "codex-bridge", "config.yml")
+  ]
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate
+  }
+
+  return path.join(process.cwd(), "config", "tenants.yaml")
 }

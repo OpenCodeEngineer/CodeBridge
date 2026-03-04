@@ -1,6 +1,57 @@
-# Codex Bridge
+# CodeBridge
 
 Bridge Slack threads and GitHub issue comments to a local Codex CLI runner. Posts progress updates and can open PRs.
+
+## GitHub Commands
+
+Use one of the configured command prefixes (`codex:`, `/codex`, `@codex`) in issue comments:
+
+- `run <prompt>`: create a new run (default when no verb is provided)
+- `reply <prompt>`: create a follow-up run for the same issue
+- `status`: post latest run status for the issue
+- `pause`: acknowledge pause intent (runtime pause control not implemented yet)
+- `resume`: acknowledge resume intent (runtime resume control not implemented yet)
+
+## GitHub Lifecycle Labels
+
+Bridge maintains issue labels as lightweight session state:
+
+- `agent:in-progress`
+- `agent:idle`
+- `agent:completed`
+- `agent:managed`
+
+If a run is created without an issue number (for example from non-GitHub entry points), bridge auto-creates an issue in the configured repository and associates the run with it.
+
+## Codex CLI Session Sync (Notify Hook)
+
+Bridge exposes `POST /codex/notify` to ingest Codex turn-complete notifications and mirror session state to GitHub issues.
+
+Behavior:
+
+- One Codex session (`thread-id`) maps to one GitHub issue.
+- If prompt includes an issue reference (`#123`, `owner/repo#123`, or full GitHub issue/PR URL), bridge binds session to that issue.
+- If prompt has no issue reference, bridge auto-creates an issue and binds the session.
+- On each turn:
+  - sets lifecycle label to `agent:in-progress`
+  - posts user prompt as an issue comment
+  - posts assistant response as an issue comment
+  - marks issue `agent:completed` after response is posted
+
+### Wire Codex `notify` to Bridge
+
+Add this to Codex config:
+
+```toml
+notify = ["node", "/ABS/PATH/CodeBridge/scripts/codex-notify-bridge.mjs"]
+```
+
+Optional env vars for the script:
+
+- `CODEBRIDGE_NOTIFY_URL` (default: `http://127.0.0.1:8788/codex/notify`)
+- `CODEBRIDGE_NOTIFY_TIMEOUT_MS` (default: `2500`)
+- `CODEBRIDGE_NOTIFY_TOKEN` (optional header value)
+- Legacy aliases are still accepted: `CODEX_BRIDGE_NOTIFY_URL`, `CODEX_BRIDGE_NOTIFY_TIMEOUT_MS`, `CODEX_BRIDGE_NOTIFY_TOKEN`
 
 ## Run (Local)
 
@@ -8,7 +59,7 @@ Bridge Slack threads and GitHub issue comments to a local Codex CLI runner. Post
 2. Start with SQLite + in‑memory queue:
 
 ```bash
-export DATABASE_URL=sqlite://./data/codex-bridge.db
+export DATABASE_URL=sqlite://./data/codebridge.db
 export QUEUE_MODE=memory
 pnpm install
 pnpm dev

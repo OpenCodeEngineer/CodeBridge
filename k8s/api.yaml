@@ -1,20 +1,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: codex-bridge-api
+  name: codebridge-api
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: codex-bridge-api
+      app: codebridge-api
   template:
     metadata:
       labels:
-        app: codex-bridge-api
+        app: codebridge-api
     spec:
       containers:
         - name: api
-          image: codex-bridge:latest
+          image: codebridge:latest
           env:
             - name: ROLE
               value: api
@@ -23,44 +23,44 @@ spec:
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: codex-bridge-secrets
+                  name: codebridge-secrets
                   key: database_url
             - name: REDIS_URL
               valueFrom:
                 secretKeyRef:
-                  name: codex-bridge-secrets
+                  name: codebridge-secrets
                   key: redis_url
             - name: CONFIG_PATH
               value: /app/config/tenants.yaml
             - name: SLACK_BOT_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: codex-bridge-secrets
+                  name: codebridge-secrets
                   key: slack_bot_token
             - name: SLACK_APP_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: codex-bridge-secrets
+                  name: codebridge-secrets
                   key: slack_app_token
             - name: SLACK_SIGNING_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: codex-bridge-secrets
+                  name: codebridge-secrets
                   key: slack_signing_secret
             - name: GITHUB_APP_ID
               valueFrom:
                 secretKeyRef:
-                  name: codex-bridge-secrets
+                  name: codebridge-secrets
                   key: github_app_id
             - name: GITHUB_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
-                  name: codex-bridge-secrets
+                  name: codebridge-secrets
                   key: github_private_key
             - name: GITHUB_WEBHOOK_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: codex-bridge-secrets
+                  name: codebridge-secrets
                   key: github_webhook_secret
           ports:
             - containerPort: 8788
@@ -68,10 +68,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: codex-bridge-api
+  name: codebridge-api
 spec:
   selector:
-    app: codex-bridge-api
+    app: codebridge-api
   ports:
     - port: 8788
       targetPort: 8788

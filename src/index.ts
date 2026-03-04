@@ -10,6 +10,7 @@ import { createGitHubApp } from "./github.js"
 import { resolveRepo, ensureRepoPath } from "./repo.js"
 import { logger } from "./logger.js"
 import { startGitHubPolling } from "./github-poll.js"
+import { createCodexNotifyHandler } from "./codex-notify.js"
 
 const main = async () => {
   const env = loadEnv()
@@ -46,9 +47,17 @@ const main = async () => {
 
   if (env.role === "all" || env.role === "api") {
     const app = express()
+    app.use(express.json({ limit: "1mb" }))
+
     app.get("/health", (_req, res) => {
       res.json({ status: "ok" })
     })
+    app.post("/codex/notify", createCodexNotifyHandler({
+      config,
+      githubAppId: env.githubAppId,
+      githubPrivateKey: env.githubPrivateKey,
+      ingestToken: env.codexNotifyToken
+    }))
 
     const github = createGitHubApp(config, env, async input => {
       const tenant = config.tenants.find(t => t.id === input.tenantId)

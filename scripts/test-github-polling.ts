@@ -14,8 +14,8 @@ type Args = {
 
 const parseArgs = (argv: string[]): Args => {
   const args: Args = {
-    title: "Codex Bridge Polling Test",
-    body: "Test issue for codex-bridge polling mode.",
+    title: "CodeBridge Polling Test",
+    body: "Test issue for CodeBridge polling mode.",
     comment: "codex: Please respond with the path to README.md (if present). Do not modify files.",
     timeoutSec: 240,
     pollSec: 5,
@@ -80,7 +80,7 @@ const main = async () => {
   const config = await loadConfig(env.configPath)
 
   const defaultRepo = config.tenants[0]?.repos[0]?.fullName
-  const repo = args.repo ?? process.env.CODEX_BRIDGE_TEST_REPO ?? defaultRepo
+  const repo = args.repo ?? process.env.CODEBRIDGE_TEST_REPO ?? process.env.CODEX_BRIDGE_TEST_REPO ?? defaultRepo
   if (!repo) throw new Error("No repo provided and config has no repos")
 
   const issueNumber = args.issue ?? (() => {

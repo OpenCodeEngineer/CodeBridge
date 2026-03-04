@@ -60,6 +60,28 @@ export function parseIssueOrPr(text: string): GitHubContext | null {
   return null
 }
 
+export function parseIssueReference(
+  text: string,
+  defaults?: { owner: string; repo: string }
+): GitHubContext | null {
+  const direct = parseIssueOrPr(text)
+  if (direct) return direct
+
+  const scoped = parseScopedIssueRef(text)
+  if (scoped) return scoped
+
+  const local = parseLocalIssueRef(text)
+  if (local && defaults) {
+    return {
+      owner: defaults.owner,
+      repo: defaults.repo,
+      issueNumber: local
+    }
+  }
+
+  return null
+}
+
 export function extractRepoHint(text: string): string | null {
   const match = text.match(/\b([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)\b/)
   if (!match) return null
@@ -84,4 +106,20 @@ export function parsePrUrl(text: string): GitHubContext | null {
     repo: match[2],
     issueNumber: parseInt(match[3], 10)
   }
+}
+
+function parseScopedIssueRef(text: string): GitHubContext | null {
+  const match = text.match(/\b([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)#(\d+)\b/)
+  if (!match) return null
+  return {
+    owner: match[1],
+    repo: match[2],
+    issueNumber: parseInt(match[3], 10)
+  }
+}
+
+function parseLocalIssueRef(text: string): number | null {
+  const match = text.match(/(?<![A-Za-z0-9_])#(\d+)\b/)
+  if (!match) return null
+  return parseInt(match[1], 10)
 }

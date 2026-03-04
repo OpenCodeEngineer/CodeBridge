@@ -2,6 +2,11 @@ import path from "node:path"
 import { access } from "node:fs/promises"
 import type { AppConfig, RepoConfig, TenantConfig } from "./types.js"
 
+export type TenantRepoMatch = {
+  tenant: TenantConfig
+  repo: RepoConfig
+}
+
 export function findTenantBySlackTeam(config: AppConfig, teamId: string): TenantConfig | null {
   return config.tenants.find(t => t.slack?.teamId === teamId) ?? null
 }
@@ -13,6 +18,36 @@ export function findTenantByGithubInstallation(config: AppConfig, installationId
 
 export function findTenantByRepoFullName(config: AppConfig, fullName: string): TenantConfig | null {
   return config.tenants.find(t => t.repos.some(r => r.fullName.toLowerCase() === fullName.toLowerCase())) ?? null
+}
+
+export function findTenantRepoByFullName(config: AppConfig, fullName: string): TenantRepoMatch | null {
+  const normalized = fullName.toLowerCase()
+  for (const tenant of config.tenants) {
+    for (const repo of tenant.repos) {
+      if (repo.fullName.toLowerCase() === normalized) {
+        return { tenant, repo }
+      }
+    }
+  }
+  return null
+}
+
+export function findTenantRepoByPath(config: AppConfig, cwd: string): TenantRepoMatch | null {
+  const resolvedCwd = normalizeForCompare(path.resolve(cwd))
+  let bestMatch: TenantRepoMatch | null = null
+  let bestLen = -1
+
+  for (const tenant of config.tenants) {
+    for (const repo of tenant.repos) {
+      const repoPath = normalizeForCompare(path.resolve(repo.path))
+      if (!pathContains(repoPath, resolvedCwd)) continue
+      if (repoPath.length <= bestLen) continue
+      bestMatch = { tenant, repo }
+      bestLen = repoPath.length
+    }
+  }
+
+  return bestMatch
 }
 
 export function resolveRepo(tenant: TenantConfig, repoHint?: string): RepoConfig | null {
@@ -31,4 +66,15 @@ export async function ensureRepoPath(repo: RepoConfig): Promise<string> {
   const resolved = path.resolve(repo.path)
   await access(resolved)
   return resolved
+}
+
+function normalizeForCompare(value: string): string {
+  const normalized = path.normalize(value)
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized
+}
+
+function pathContains(basePath: string, candidate: string): boolean {
+  if (candidate === basePath) return true
+  const suffix = process.platform === "win32" ? "\\" : "/"
+  return candidate.startsWith(basePath.endsWith(suffix) ? basePath : `${basePath}${suffix}`)
 }

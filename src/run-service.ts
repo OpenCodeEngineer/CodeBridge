@@ -138,7 +138,7 @@ function buildIssueTitle(prompt: string): string {
 
 function buildIssueBody(prompt: string): string {
   return [
-    "Created automatically by codex-bridge.",
+    "Created automatically by CodeBridge.",
     "",
     "### Requested task",
     prompt
