@@ -26,7 +26,10 @@ export type RunStore = {
     repoFullName: string
     issueNumber: number
   }) => Promise<RunRecord | null>
-  getGithubPollState: (tenantId: string, repoFullName: string) => Promise<{ lastCommentId: number | null } | null>
+  getGithubPollState: (
+    tenantId: string,
+    repoFullName: string
+  ) => Promise<{ lastCommentId: number | null; lastCommentCreatedAt: string | null } | null>
   updateGithubPollState: (input: {
     tenantId: string
     repoFullName: string
@@ -129,11 +132,16 @@ export function createPostgresStore(databaseUrl: string): RunStore {
 
   const getGithubPollState = async (tenantId: string, repoFullName: string) => {
     const result = await pool.query(
-      "SELECT last_comment_id FROM github_poll_state WHERE tenant_id = $1 AND repo_full_name = $2",
+      "SELECT last_comment_id, last_comment_created_at FROM github_poll_state WHERE tenant_id = $1 AND repo_full_name = $2",
       [tenantId, repoFullName]
     )
     if (result.rowCount === 0) return null
-    return { lastCommentId: result.rows[0].last_comment_id ?? null }
+    return {
+      lastCommentId: result.rows[0].last_comment_id ?? null,
+      lastCommentCreatedAt: result.rows[0].last_comment_created_at
+        ? new Date(result.rows[0].last_comment_created_at).toISOString()
+        : null
+    }
   }
 
   const updateGithubPollState = async (input: {
@@ -284,7 +292,7 @@ export function createSqliteStore(databaseUrl: string): RunStore {
   const insertEventStmt = db.prepare("INSERT INTO run_events (run_id, seq, event_type, payload) VALUES (?,?,?,?)")
 
   const getPollStateStmt = db.prepare(
-    "SELECT last_comment_id FROM github_poll_state WHERE tenant_id = ? AND repo_full_name = ?"
+    "SELECT last_comment_id, last_comment_created_at FROM github_poll_state WHERE tenant_id = ? AND repo_full_name = ?"
   )
   const upsertPollStateStmt = db.prepare(
     `INSERT INTO github_poll_state (tenant_id, repo_full_name, last_comment_id, last_comment_created_at)
@@ -357,9 +365,14 @@ export function createSqliteStore(databaseUrl: string): RunStore {
   }
 
   const getGithubPollState = async (tenantId: string, repoFullName: string) => {
-    const row = getPollStateStmt.get(tenantId, repoFullName) as { last_comment_id: number | null } | undefined
+    const row = getPollStateStmt.get(tenantId, repoFullName) as
+      | { last_comment_id: number | null; last_comment_created_at: string | null }
+      | undefined
     if (!row) return null
-    return { lastCommentId: row.last_comment_id ?? null }
+    return {
+      lastCommentId: row.last_comment_id ?? null,
+      lastCommentCreatedAt: row.last_comment_created_at ?? null
+    }
   }
 
   const updateGithubPollState = async (input: {

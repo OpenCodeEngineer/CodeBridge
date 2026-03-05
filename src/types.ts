@@ -7,6 +7,20 @@ export type GitHubConfig = {
   installationId?: number
   repoAllowlist?: string[]
   commandPrefixes?: string[]
+  assignmentAssignees?: string[]
+}
+
+export type VibeAgentsIntegrationConfig = {
+  endpoint: string
+  token?: string
+  author?: string
+  project?: string
+  enabled?: boolean
+  timeoutMs?: number
+}
+
+export type IntegrationsConfig = {
+  vibeAgents?: VibeAgentsIntegrationConfig
 }
 
 export type RepoConfig = {
@@ -26,7 +40,17 @@ export type TenantConfig = {
   defaultRepo?: string
 }
 
+export type SecretsConfig = {
+  githubAppId?: number
+  githubPrivateKey?: string
+  githubWebhookSecret?: string
+  codexNotifyToken?: string
+  vibeAgentsToken?: string
+}
+
 export type AppConfig = {
+  secrets?: SecretsConfig
+  integrations?: IntegrationsConfig
   tenants: TenantConfig[]
 }
 

@@ -6,6 +6,7 @@ export type ParsedCommand = {
   type: CommandType
   prompt: string
   repoHint?: string
+  tenantHint?: string
   issue?: GitHubContext
 }
 
@@ -19,12 +20,21 @@ export function extractCommand(text: string, prefixes: string[], botUserId?: str
   if (mentionPrefix && remaining.startsWith(mentionPrefix)) {
     remaining = remaining.slice(mentionPrefix.length).trim()
   } else {
-    const prefix = prefixes.find(p => remaining.toLowerCase().startsWith(p.toLowerCase()))
+    const prefix = findBestPrefixMatch(remaining, prefixes)
     if (!prefix) return null
     remaining = remaining.slice(prefix.length).trim()
   }
 
+  // Allow human-friendly punctuation after a prefix/mention:
+  // "@CodexEngineer, do X" / "codex: - do X"
+  remaining = remaining.replace(/^[,:\-]\s*/, "")
+
   if (!remaining) return null
+
+  const tenantHint = extractTenantHint(remaining)
+  if (tenantHint) {
+    remaining = stripTenantHint(remaining, tenantHint)
+  }
 
   const parsed = parseCommandType(remaining)
   if (!parsed) return null
@@ -36,6 +46,32 @@ export function extractCommand(text: string, prefixes: string[], botUserId?: str
     type: parsed.type,
     prompt: parsed.prompt,
     repoHint: repoHint ?? undefined,
+    tenantHint: tenantHint ?? undefined,
+    issue: issue ?? undefined
+  }
+}
+
+export function extractCommandFromManagedIssue(text: string): ParsedCommand | null {
+  const trimmed = text.trim()
+  if (!trimmed) return null
+
+  let remaining = trimmed
+  const tenantHint = extractTenantHint(remaining)
+  if (tenantHint) {
+    remaining = stripTenantHint(remaining, tenantHint)
+  }
+
+  const parsed = parseCommandType(remaining)
+  if (!parsed) return null
+
+  const issue = parseIssueOrPr(remaining)
+  const repoHint = extractRepoHint(remaining)
+
+  return {
+    type: parsed.type,
+    prompt: parsed.prompt,
+    repoHint: repoHint ?? undefined,
+    tenantHint: tenantHint ?? undefined,
     issue: issue ?? undefined
   }
 }
@@ -122,4 +158,31 @@ function parseLocalIssueRef(text: string): number | null {
   const match = text.match(/(?<![A-Za-z0-9_])#(\d+)\b/)
   if (!match) return null
   return parseInt(match[1], 10)
+}
+
+function findBestPrefixMatch(text: string, prefixes: string[]): string | null {
+  const lower = text.toLowerCase()
+  let best: string | null = null
+  for (const prefix of prefixes) {
+    if (!lower.startsWith(prefix.toLowerCase())) continue
+    if (!best || prefix.length > best.length) {
+      best = prefix
+    }
+  }
+  return best
+}
+
+function extractTenantHint(text: string): string | null {
+  const match = text.match(/(?:^|\s)(?:tenant|t)\s*[:=]\s*([A-Za-z0-9_.-]+)\b/i)
+  if (!match) return null
+  return match[1]
+}
+
+function stripTenantHint(text: string, tenantHint: string): string {
+  const pattern = new RegExp(`(?:^|\\s)(?:tenant|t)\\s*[:=]\\s*${escapeRegExp(tenantHint)}\\b`, "i")
+  return text.replace(pattern, " ").replace(/\s+/g, " ").trim()
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }

@@ -11,10 +11,15 @@ import { resolveRepo, ensureRepoPath } from "./repo.js"
 import { logger } from "./logger.js"
 import { startGitHubPolling } from "./github-poll.js"
 import { createCodexNotifyHandler } from "./codex-notify.js"
+import type { AppConfig } from "./types.js"
+import { createVibeAgentsSink } from "./vibe-agents.js"
 
 const main = async () => {
   const env = loadEnv()
   const config = await loadConfig(env.configPath)
+  const secrets = resolveRuntimeSecrets(config, env)
+  const integrations = resolveRuntimeIntegrations(config, env, secrets)
+  const vibeAgentsSink = createVibeAgentsSink(integrations.vibeAgents)
 
   const store = createStore(env.databaseUrl)
   await store.ensureSchema()
@@ -26,8 +31,9 @@ const main = async () => {
     store,
     queue,
     slackClient,
-    githubAppId: env.githubAppId,
-    githubPrivateKey: env.githubPrivateKey
+    githubAppId: secrets.githubAppId,
+    githubPrivateKey: secrets.githubPrivateKey,
+    vibeAgents: vibeAgentsSink
   })
 
   if (env.role === "all" || env.role === "worker") {
@@ -37,9 +43,10 @@ const main = async () => {
       env: {
         codexPath: env.codexPath,
         codexApiKey: env.codexApiKey,
-        githubAppId: env.githubAppId,
-        githubPrivateKey: env.githubPrivateKey
-      }
+        githubAppId: secrets.githubAppId,
+        githubPrivateKey: secrets.githubPrivateKey
+      },
+      vibeAgents: vibeAgentsSink
     })
     startWorker(env.redisUrl, runner, env.queueMode)
     logger.info("Worker started")
@@ -54,12 +61,16 @@ const main = async () => {
     })
     app.post("/codex/notify", createCodexNotifyHandler({
       config,
-      githubAppId: env.githubAppId,
-      githubPrivateKey: env.githubPrivateKey,
-      ingestToken: env.codexNotifyToken
+      githubAppId: secrets.githubAppId,
+      githubPrivateKey: secrets.githubPrivateKey,
+      ingestToken: secrets.codexNotifyToken
     }))
 
-    const github = createGitHubApp(config, env, async input => {
+    const github = createGitHubApp(config, {
+      githubAppId: secrets.githubAppId,
+      githubPrivateKey: secrets.githubPrivateKey,
+      githubWebhookSecret: secrets.githubWebhookSecret
+    }, async input => {
       const tenant = config.tenants.find(t => t.id === input.tenantId)
       if (!tenant) return
       const repo = resolveRepo(tenant, input.repoFullName)
@@ -116,12 +127,44 @@ const main = async () => {
       store,
       runService,
       env: {
-        githubAppId: env.githubAppId,
-        githubPrivateKey: env.githubPrivateKey,
+        githubAppId: secrets.githubAppId,
+        githubPrivateKey: secrets.githubPrivateKey,
         githubPollIntervalSec: env.githubPollIntervalSec,
         githubPollBackfill: env.githubPollBackfill
       }
     })
+  }
+}
+
+function resolveRuntimeSecrets(config: AppConfig, env: ReturnType<typeof loadEnv>) {
+  return {
+    githubAppId: config.secrets?.githubAppId ?? env.githubAppId,
+    githubPrivateKey: config.secrets?.githubPrivateKey ?? env.githubPrivateKey,
+    githubWebhookSecret: config.secrets?.githubWebhookSecret ?? env.githubWebhookSecret,
+    codexNotifyToken: config.secrets?.codexNotifyToken ?? env.codexNotifyToken,
+    vibeAgentsToken: config.secrets?.vibeAgentsToken ?? env.vibeAgentsToken
+  }
+}
+
+function resolveRuntimeIntegrations(
+  config: AppConfig,
+  env: ReturnType<typeof loadEnv>,
+  secrets: ReturnType<typeof resolveRuntimeSecrets>
+) {
+  const configuredVibe = config.integrations?.vibeAgents
+  if (!configuredVibe && !env.vibeAgentsEndpoint) {
+    return { vibeAgents: undefined }
+  }
+
+  return {
+    vibeAgents: {
+      endpoint: env.vibeAgentsEndpoint ?? configuredVibe?.endpoint ?? "",
+      token: env.vibeAgentsToken ?? configuredVibe?.token ?? secrets.vibeAgentsToken,
+      author: env.vibeAgentsAuthor ?? configuredVibe?.author,
+      project: env.vibeAgentsProject ?? configuredVibe?.project,
+      enabled: env.vibeAgentsEnabled ?? configuredVibe?.enabled ?? true,
+      timeoutMs: env.vibeAgentsTimeoutMs ?? configuredVibe?.timeoutMs
+    }
   }
 }
 

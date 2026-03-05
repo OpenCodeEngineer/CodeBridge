@@ -25,7 +25,8 @@ const slackSchema = z.object({
 const githubSchema = z.object({
   installationId: z.number().optional(),
   repoAllowlist: z.array(z.string()).optional(),
-  commandPrefixes: z.array(z.string()).optional()
+  commandPrefixes: z.array(z.string()).optional(),
+  assignmentAssignees: z.array(z.string()).optional()
 })
 
 const tenantSchema = z.object({
@@ -37,7 +38,30 @@ const tenantSchema = z.object({
   defaultRepo: z.string().optional()
 })
 
+const secretsSchema = z.object({
+  githubAppId: z.number().optional(),
+  githubPrivateKey: z.string().optional(),
+  githubWebhookSecret: z.string().optional(),
+  codexNotifyToken: z.string().optional(),
+  vibeAgentsToken: z.string().optional()
+})
+
+const vibeAgentsSchema = z.object({
+  endpoint: z.string().url(),
+  token: z.string().optional(),
+  author: z.string().optional(),
+  project: z.string().optional(),
+  enabled: z.boolean().optional(),
+  timeoutMs: z.number().int().positive().optional()
+})
+
+const integrationsSchema = z.object({
+  vibeAgents: vibeAgentsSchema.optional()
+})
+
 const appSchema = z.object({
+  secrets: secretsSchema.optional(),
+  integrations: integrationsSchema.optional(),
   tenants: z.array(tenantSchema)
 })
 
@@ -58,6 +82,12 @@ export type EnvConfig = {
   codexPath?: string
   codexApiKey?: string
   codexNotifyToken?: string
+  vibeAgentsEndpoint?: string
+  vibeAgentsToken?: string
+  vibeAgentsAuthor?: string
+  vibeAgentsProject?: string
+  vibeAgentsEnabled?: boolean
+  vibeAgentsTimeoutMs?: number
   configPath: string
 }
 
@@ -71,6 +101,8 @@ export function loadEnv(): EnvConfig {
   const githubAppId = process.env.GITHUB_APP_ID ? parseInt(process.env.GITHUB_APP_ID, 10) : undefined
   const githubPollIntervalSec = parseInt(process.env.GITHUB_POLL_INTERVAL ?? "0", 10)
   const githubPollBackfill = parseBoolean(process.env.GITHUB_POLL_BACKFILL ?? "false")
+  const vibeAgentsTimeoutMsRaw = process.env.VIBE_AGENTS_TIMEOUT_MS
+  const vibeAgentsTimeoutMsParsed = vibeAgentsTimeoutMsRaw ? parseInt(vibeAgentsTimeoutMsRaw, 10) : undefined
 
   return {
     port,
@@ -89,6 +121,12 @@ export function loadEnv(): EnvConfig {
     codexPath: process.env.CODEX_PATH,
     codexApiKey: process.env.CODEX_API_KEY,
     codexNotifyToken: process.env.CODEBRIDGE_NOTIFY_TOKEN ?? process.env.CODEX_BRIDGE_NOTIFY_TOKEN,
+    vibeAgentsEndpoint: process.env.VIBE_AGENTS_ENDPOINT,
+    vibeAgentsToken: process.env.VIBE_AGENTS_TOKEN,
+    vibeAgentsAuthor: process.env.VIBE_AGENTS_AUTHOR,
+    vibeAgentsProject: process.env.VIBE_AGENTS_PROJECT,
+    vibeAgentsEnabled: process.env.VIBE_AGENTS_ENABLED ? parseBoolean(process.env.VIBE_AGENTS_ENABLED) : undefined,
+    vibeAgentsTimeoutMs: Number.isFinite(vibeAgentsTimeoutMsParsed) ? vibeAgentsTimeoutMsParsed : undefined,
     configPath
   }
 }

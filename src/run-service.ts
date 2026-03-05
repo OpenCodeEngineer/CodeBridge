@@ -6,9 +6,11 @@ import { postSlackStatus } from "./slack.js"
 import { createInstallationClient, formatPrivateKey } from "./github-auth.js"
 import { formatGitHubStatus, formatSlackStatus } from "./status.js"
 import { syncIssueLifecycleState } from "./github-issue-state.js"
+import { isDiscussionSourceKey, postDiscussionCommentFromContext } from "./github-discussions.js"
 import { ProgressTracker } from "./progress.js"
 import type { RunQueue } from "./queue.js"
 import { logger } from "./logger.js"
+import type { VibeAgentsSink } from "./vibe-agents.js"
 
 export type RunService = {
   createRun: (input: {
@@ -30,8 +32,9 @@ export function createRunService(params: {
   slackClient?: WebClient
   githubAppId?: number
   githubPrivateKey?: string
+  vibeAgents?: VibeAgentsSink
 }) : RunService {
-  const { store, queue, slackClient, githubAppId, githubPrivateKey } = params
+  const { store, queue, slackClient, githubAppId, githubPrivateKey, vibeAgents } = params
 
   const createRun = async (input: {
     tenantId: string
@@ -95,6 +98,8 @@ export function createRunService(params: {
     const isNewRun = run.id === id
     if (!isNewRun) return run
 
+    void vibeAgents?.sendRunCreated(run)
+
     if (run.slack && slackClient) {
       const tracker = new ProgressTracker()
       const message = formatSlackStatus(run, tracker.snapshot(), "queued")
@@ -108,14 +113,18 @@ export function createRunService(params: {
       try {
         const tracker = new ProgressTracker()
         const body = formatGitHubStatus(run, tracker.snapshot(), "queued")
-        const response = await githubClient.octokit.issues.createComment({
-          owner: run.github.owner,
-          repo: run.github.repo,
-          issue_number: run.github.issueNumber,
-          body
-        })
-        await store.updateGithubComment(run.id, response.data.id)
-        await syncIssueLifecycleState(githubClient, run.github, "in-progress")
+        if (isDiscussionSourceKey(run.sourceKey)) {
+          await postDiscussionCommentFromContext(githubClient, run.github, body)
+        } else {
+          const response = await githubClient.octokit.issues.createComment({
+            owner: run.github.owner,
+            repo: run.github.repo,
+            issue_number: run.github.issueNumber,
+            body
+          })
+          await store.updateGithubComment(run.id, response.data.id)
+          await syncIssueLifecycleState(githubClient, run.github, "in-progress")
+        }
       } catch (error) {
         logger.warn({ err: error, runId: run.id }, "GitHub status comment failed")
       }

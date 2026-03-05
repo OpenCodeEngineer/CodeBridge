@@ -3,3 +3,5 @@ pnpm-lock.yaml
 dist
 .env
 .DS_Store
+data/*.db
+config/tenants.yaml

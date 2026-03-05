@@ -1,12 +1,13 @@
 import { execa } from "execa"
 import { loadConfig, loadEnv } from "../src/config.js"
+import { resolveDefaultGithubCommandPrefixes } from "../src/command-prefixes.js"
 
 type Args = {
   repo?: string
   issue?: number
   title: string
   body: string
-  comment: string
+  comment?: string
   timeoutSec: number
   pollSec: number
   close: boolean
@@ -16,7 +17,6 @@ const parseArgs = (argv: string[]): Args => {
   const args: Args = {
     title: "CodeBridge Polling Test",
     body: "Test issue for CodeBridge polling mode.",
-    comment: "codex: Please respond with the path to README.md (if present). Do not modify files.",
     timeoutSec: 240,
     pollSec: 5,
     close: false
@@ -70,8 +70,34 @@ const extractIssueNumber = (url: string): number => {
 const isCodexComment = (body: string) => body.includes("Codex run")
 
 const isFinal = (body: string) => {
-  const normalized = body.toLowerCase()
-  return normalized.includes("complete") || normalized.includes("status: failed") || normalized.includes("status: succeeded")
+  const firstLine = body.split("\n")[0]?.trim().toLowerCase() ?? ""
+  if (/^codex run\s+\S+\s+complete$/.test(firstLine)) return true
+
+  const statusMatch = body.match(/^\s*status:\s*([a-z-]+)/im)
+  if (!statusMatch) return false
+  const status = statusMatch[1].toLowerCase()
+  return status === "completed" || status === "failed" || status === "succeeded"
+}
+
+const resolveDefaultComment = async (args: Args, env: ReturnType<typeof loadEnv>, config: Awaited<ReturnType<typeof loadConfig>>) => {
+  if (args.comment) return args.comment
+
+  const appPrefixes = await resolveDefaultGithubCommandPrefixes({
+    githubAppId: env.githubAppId ?? config.secrets?.githubAppId,
+    githubPrivateKey: env.githubPrivateKey ?? config.secrets?.githubPrivateKey
+  })
+  const handle = appPrefixes[0] ?? (() => {
+    const fallbackAssignee = config.tenants
+      .flatMap(tenant => tenant.github?.assignmentAssignees ?? [])
+      .find(Boolean)
+    return fallbackAssignee ? `@${fallbackAssignee}` : null
+  })()
+
+  if (!handle) {
+    throw new Error("Unable to resolve a GitHub mention handle. Configure GitHub App credentials or pass --comment explicitly.")
+  }
+
+  return `${handle} run Please respond with the path to README.md (if present). Do not modify files.`
 }
 
 const main = async () => {
@@ -82,6 +108,7 @@ const main = async () => {
   const defaultRepo = config.tenants[0]?.repos[0]?.fullName
   const repo = args.repo ?? process.env.CODEBRIDGE_TEST_REPO ?? process.env.CODEX_BRIDGE_TEST_REPO ?? defaultRepo
   if (!repo) throw new Error("No repo provided and config has no repos")
+  const comment = await resolveDefaultComment(args, env, config)
 
   const issueNumber = args.issue ?? (() => {
     const url = gh([
@@ -106,12 +133,11 @@ const main = async () => {
     "--repo",
     repo,
     "--body",
-    args.comment
+    comment
   ])
 
   const startTime = Date.now()
   const deadline = Date.now() + args.timeoutSec * 1000
-  let commentId: number | null = null
 
   while (Date.now() < deadline) {
     const raw = await gh([
@@ -119,23 +145,17 @@ const main = async () => {
       `repos/${repo}/issues/${resolvedIssue}/comments?per_page=100`
     ])
     const comments = JSON.parse(raw) as Array<{ id: number; body: string; created_at: string }>
-
-    if (!commentId) {
-      const recent = comments
-        .filter(comment => new Date(comment.created_at).getTime() >= startTime - 1000)
-        .find(comment => isCodexComment(comment.body))
-      if (recent) commentId = recent.id
-    }
-
-    if (commentId) {
-      const current = comments.find(comment => comment.id === commentId)
-      if (current && isFinal(current.body)) {
-        console.log(current.body)
-        if (args.close) {
-          await gh(["issue", "close", String(resolvedIssue), "--repo", repo])
-        }
-        return
+    const recentCodex = comments
+      .filter(comment => new Date(comment.created_at).getTime() >= startTime - 1000)
+      .filter(comment => isCodexComment(comment.body))
+      .sort((a, b) => a.id - b.id)
+    const latest = recentCodex[recentCodex.length - 1]
+    if (latest && isFinal(latest.body)) {
+      console.log(latest.body)
+      if (args.close) {
+        await gh(["issue", "close", String(resolvedIssue), "--repo", repo])
       }
+      return
     }
 
     await sleep(args.pollSec * 1000)
