@@ -20,6 +20,7 @@ const disabledMcpServersCache = new Map<string, Promise<Record<string, { enabled
 export type RunnerEnv = {
   codexPath?: string
   codexApiKey?: string
+  codexTurnTimeoutMs: number
   githubAppId?: number
   githubPrivateKey?: string
 }
@@ -42,6 +43,7 @@ export function createRunner(params: {
 
     const tracker = new ProgressTracker()
     const throttler = new Throttler(2000)
+    const codexTurnTimeoutMs = Math.max(30_000, env.codexTurnTimeoutMs)
 
     const githubClient = await getGitHubClient(run, env)
     if (run.github && githubClient && !discussionTarget) {
@@ -129,17 +131,28 @@ export function createRunner(params: {
         // Auto-approve all commands; the bridge is fully autonomous.
         approvalPolicy: "never",
       })
+      const turnAbortController = new AbortController()
+      const turnTimeout = setTimeout(() => {
+        turnAbortController.abort(`Codex turn timed out after ${Math.round(codexTurnTimeoutMs / 1000)}s`)
+      }, codexTurnTimeoutMs)
 
       let seq = 0
       let finalResponse = ""
-      const { events } = await thread.runStreamed(prompt)
-      for await (const event of events) {
-        seq += 1
-        if (event.type === "item.completed" && event.item.type === "agent_message") {
-          finalResponse = event.item.text
-          tracker.setAgentMessage(event.item.text)
+      try {
+        // Codex SDK TurnOptions supports AbortSignal via `signal`.
+        const { events } = await thread.runStreamed(prompt, {
+          signal: turnAbortController.signal
+        })
+        for await (const event of events) {
+          seq += 1
+          if (event.type === "item.completed" && event.item.type === "agent_message") {
+            finalResponse = event.item.text
+            tracker.setAgentMessage(event.item.text)
+          }
+          await handleEvent(event, seq)
         }
-        await handleEvent(event, seq)
+      } finally {
+        clearTimeout(turnTimeout)
       }
 
       const hasChanges = await isDirty(run.repoPath)
@@ -197,16 +210,21 @@ export function createRunner(params: {
       const message = formatFinalSummary(run, finalResponse || "Completed", pr.data.html_url)
       await finalize(run, "succeeded", message, updateStatus, githubClient, slackClient)
     } catch (error) {
+      const runError = error instanceof Error && error.name === "AbortError"
+        ? new Error(`Codex turn timed out after ${Math.round(codexTurnTimeoutMs / 1000)}s`)
+        : error instanceof Error
+          ? error
+          : new Error(String(error))
       await store.updateRunStatus(run.id, "failed")
       void vibeAgents?.sendRunStatus(run, "failed", {
-        summary: error instanceof Error ? error.message : String(error)
+        summary: runError.message
       })
       if (run.github && githubClient && !discussionTarget) {
         await syncIssueLifecycleState(githubClient, run.github, "idle")
       }
-      tracker.pushLine(error instanceof Error ? error.message : String(error))
+      tracker.pushLine(runError.message)
       await updateStatus("failed")
-      throw error
+      throw runError
     }
   }
 }
