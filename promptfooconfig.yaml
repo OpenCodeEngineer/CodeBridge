@@ -1,0 +1,88 @@
+# CodeBridge Eval — promptfoo configuration
+# Evaluates Codex task execution quality via the CodeBridge GitHub bot.
+#
+# Usage:
+#   pnpm exec promptfoo eval          # run all cases
+#   pnpm exec promptfoo eval -j 1     # serial (one issue at a time)
+#   pnpm exec promptfoo view           # open results UI
+#
+# Prerequisites:
+#   - CodeBridge server running (pnpm dev or pnpm start)
+#   - gh CLI authenticated (gh auth status)
+#   - AZURE_OPENAI_API_KEY set in env
+
+description: "CodeBridge — Codex Task Execution Quality"
+
+providers:
+  - id: file://eval/provider.ts
+    config:
+      repo: dzianisv/codebridge-test
+      botLogin: "codexengineer[bot]"
+      mentionHandle: "@codexengineer"
+      timeoutSec: 300
+      pollSec: 10
+      closeIssues: true
+
+# Use Azure GPT-4.1 as the judge for llm-rubric assertions
+defaultTest:
+  options:
+    provider:
+      id: azure:chat:gpt-4.1
+      config:
+        apiHost: vibebrowser-dev.openai.azure.com
+        apiVersion: "2024-10-01-preview"
+
+# The prompt is just the issue body text; vars supply the task title for the issue.
+prompts:
+  - "{{task}}"
+
+tests:
+  # ── File creation: Python ──────────────────────────────────────────
+  - description: "Create a Python hello world file"
+    vars:
+      title: "Create a Python hello world"
+      task: >
+        Create a file called hello.py that prints 'Hello, World!' to stdout.
+        Only create the file, nothing else.
+    assert:
+      - type: llm-rubric
+        value: |
+          The bot MUST have created a Python file (hello.py) that prints 'Hello, World!'.
+          A PR diff showing hello.py with a print('Hello, World!') statement is a strong pass signal.
+          If the response only contains error messages or no useful output, score low.
+          Score 0-1 (float): 1.0 = file created correctly with clean output,
+          0.5 = correct logic but noisy/verbose output, 0.0 = wrong or no useful output.
+
+  # ── File creation: TypeScript ──────────────────────────────────────
+  - description: "Create a TypeScript/Bun hello world file"
+    vars:
+      title: "Create a TypeScript/Bun hello"
+      task: >
+        Create a file called hello.ts that uses console.log to print
+        'Hello from Bun!' — it should be valid TypeScript runnable with
+        `bun run hello.ts`. Only create the file, nothing else.
+    assert:
+      - type: llm-rubric
+        value: |
+          The bot MUST have created a TypeScript file (hello.ts) that prints 'Hello from Bun!' via console.log.
+          A PR diff showing hello.ts is a strong pass signal.
+          If the response only contains error messages or no useful output, score low.
+          Score 0-1 (float): 1.0 = file created correctly with clean output,
+          0.5 = correct logic but noisy output, 0.0 = wrong or no useful output.
+
+  # ── Research / knowledge task ──────────────────────────────────────
+  - description: "Research: when was the first GPT model released?"
+    vars:
+      title: "Research first GPT model release date"
+      task: >
+        Research and tell me: when was the first GPT model released by OpenAI?
+        Provide the year and month if possible, and a one-sentence summary.
+    assert:
+      - type: llm-rubric
+        value: |
+          The bot should state that GPT-1 was released in June 2018
+          (paper: "Improving Language Understanding by Generative Pre-Training" by Radford et al.).
+          Acceptable: mentioning 2018 as the year. Bonus for June 2018.
+          If the bot says GPT-2 (2019), GPT-3 (2020), or ChatGPT (2022) as the FIRST model, that is wrong.
+          Score 0-1 (float): 1.0 = correct date + clean summary,
+          0.7 = correct year but vague, 0.3 = wrong model/date, 0.0 = no useful answer.

@@ -81,6 +81,7 @@ export type EnvConfig = {
   githubPollBackfill: boolean
   codexPath?: string
   codexApiKey?: string
+  codexTurnTimeoutMs: number
   codexNotifyToken?: string
   vibeAgentsEndpoint?: string
   vibeAgentsToken?: string
@@ -101,6 +102,7 @@ export function loadEnv(): EnvConfig {
   const githubAppId = process.env.GITHUB_APP_ID ? parseInt(process.env.GITHUB_APP_ID, 10) : undefined
   const githubPollIntervalSec = parseInt(process.env.GITHUB_POLL_INTERVAL ?? "0", 10)
   const githubPollBackfill = parseBoolean(process.env.GITHUB_POLL_BACKFILL ?? "false")
+  const codexTurnTimeoutMs = parseInt(process.env.CODEX_TURN_TIMEOUT_MS ?? "300000", 10)
   const vibeAgentsTimeoutMsRaw = process.env.VIBE_AGENTS_TIMEOUT_MS
   const vibeAgentsTimeoutMsParsed = vibeAgentsTimeoutMsRaw ? parseInt(vibeAgentsTimeoutMsRaw, 10) : undefined
 
@@ -120,6 +122,7 @@ export function loadEnv(): EnvConfig {
     githubPollBackfill,
     codexPath: process.env.CODEX_PATH,
     codexApiKey: process.env.CODEX_API_KEY,
+    codexTurnTimeoutMs: Number.isFinite(codexTurnTimeoutMs) && codexTurnTimeoutMs > 0 ? codexTurnTimeoutMs : 300000,
     codexNotifyToken: process.env.CODEBRIDGE_NOTIFY_TOKEN ?? process.env.CODEX_BRIDGE_NOTIFY_TOKEN,
     vibeAgentsEndpoint: process.env.VIBE_AGENTS_ENDPOINT,
     vibeAgentsToken: process.env.VIBE_AGENTS_TOKEN,

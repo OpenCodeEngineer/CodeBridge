@@ -43,6 +43,7 @@ const main = async () => {
       env: {
         codexPath: env.codexPath,
         codexApiKey: env.codexApiKey,
+        codexTurnTimeoutMs: env.codexTurnTimeoutMs,
         githubAppId: secrets.githubAppId,
         githubPrivateKey: secrets.githubPrivateKey
       },
