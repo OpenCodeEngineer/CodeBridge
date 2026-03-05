@@ -1,3 +1,22 @@
+# Example values only. Do not commit real secrets to repository config.
+# Prefer putting real values in ~/.config/codebridge/config.yaml.
+secrets:
+  githubAppId: 123456
+  githubPrivateKey: "BASE64_OR_PEM_PRIVATE_KEY"
+  # githubWebhookSecret: "optional-webhook-secret"
+  # codexNotifyToken: "optional-notify-token"
+  # vibeAgentsToken: "optional-vibe-agents-token"
+
+integrations:
+  # Optional external sink for agent session dashboards.
+  vibeAgents:
+    endpoint: "https://api.vibebrowser.app/api/agents/sessions"
+    # token: "optional-token-if-not-using-secrets.vibeAgentsToken"
+    author: "dzianisv"
+    project: "VibeWebAgent"
+    enabled: true
+    timeoutMs: 8000
+
 tenants:
   - id: local
     name: Local
@@ -9,12 +28,12 @@ tenants:
         - "@codex"
     github:
       installationId: 123456
+      # Optional: assignment bootstrap handles.
+      # Use assignable GitHub users; app bot logins may not be assignable in all repos.
+      # assignmentAssignees:
+      #   - "codex-operator"
       repoAllowlist:
         - "owner/repo"
-      commandPrefixes:
-        - "codex:"
-        - "/codex"
-        - "@codex"
     repos:
       - fullName: "owner/repo"
         path: "/Users/engineer/workspace/opencode-manager"

@@ -1,6 +1,7 @@
 import { Codex } from "@openai/codex-sdk"
 import type { ThreadEvent, ThreadItem } from "@openai/codex-sdk"
 import type { WebClient } from "@slack/web-api"
+import { execa } from "execa"
 import type { RunStore } from "./storage.js"
 import type { RunRecord } from "./types.js"
 import { ProgressTracker } from "./progress.js"
@@ -9,8 +10,12 @@ import { formatGitHubStatus, formatSlackStatus, formatFinalSummary } from "./sta
 import { updateSlackStatus, postSlackStatus } from "./slack.js"
 import { createInstallationClient, formatPrivateKey } from "./github-auth.js"
 import { syncIssueLifecycleState } from "./github-issue-state.js"
+import { isDiscussionSourceKey, postDiscussionCommentFromContext } from "./github-discussions.js"
 import { isDirty, fetchOrigin, createBranch, commitAll, pushBranch, getDefaultBranchFromOrigin } from "./git.js"
 import { logger } from "./logger.js"
+import type { VibeAgentsSink } from "./vibe-agents.js"
+
+const disabledMcpServersCache = new Map<string, Promise<Record<string, { enabled: boolean }>>>()
 
 export type RunnerEnv = {
   codexPath?: string
@@ -23,20 +28,23 @@ export function createRunner(params: {
   store: RunStore
   slackClient?: WebClient
   env: RunnerEnv
+  vibeAgents?: VibeAgentsSink
 }) {
-  const { store, slackClient, env } = params
+  const { store, slackClient, env, vibeAgents } = params
 
   return async (job: { runId: string }) => {
     const run = await store.getRun(job.runId)
     if (!run) throw new Error(`Run not found: ${job.runId}`)
+    const discussionTarget = isDiscussionSourceKey(run.sourceKey)
 
     await store.updateRunStatus(run.id, "running")
+    void vibeAgents?.sendRunStatus(run, "running")
 
     const tracker = new ProgressTracker()
     const throttler = new Throttler(2000)
 
     const githubClient = await getGitHubClient(run, env)
-    if (run.github && githubClient) {
+    if (run.github && githubClient && !discussionTarget) {
       await syncIssueLifecycleState(githubClient, run.github, "in-progress")
     }
 
@@ -50,7 +58,7 @@ export function createRunner(params: {
           logger.warn({ err: error, runId: run.id }, "Slack status update failed")
         }
       }
-      if (run.github && githubClient && run.github.commentId) {
+      if (run.github && githubClient && run.github.commentId && !discussionTarget) {
         try {
           const body = formatGitHubStatus(run, snapshot, state)
           await githubClient.octokit.issues.updateComment({
@@ -98,9 +106,20 @@ export function createRunner(params: {
       await updateStatus("running")
 
       const prompt = buildPrompt(run)
+      const mcpOverrides = await resolveDisabledMcpServersConfig(env.codexPath)
       const codex = new Codex({
         codexPathOverride: env.codexPath,
-        apiKey: env.codexApiKey
+        apiKey: env.codexApiKey,
+        // Bridge owns GitHub writes via installation tokens.
+        // Disable MCP sources so issue updates are app-authored only.
+        config: {
+          features: {
+            apps: false,
+            apps_mcp_gateway: false,
+            connectors: false
+          },
+          mcp_servers: mcpOverrides
+        }
       })
       const thread = codex.startThread({
         workingDirectory: run.repoPath,
@@ -122,8 +141,29 @@ export function createRunner(params: {
       const hasChanges = await isDirty(run.repoPath)
       if (!hasChanges) {
         await store.updateRunStatus(run.id, "no_changes")
+        void vibeAgents?.sendRunStatus(run, "no_changes", {
+          summary: finalResponse.trim() || "No changes detected"
+        })
         if (run.github && githubClient) {
-          await syncIssueLifecycleState(githubClient, run.github, "completed")
+          if (!discussionTarget) {
+            await syncIssueLifecycleState(githubClient, run.github, "completed")
+          }
+          if (run.github.issueNumber && finalResponse.trim()) {
+            try {
+              if (discussionTarget) {
+                await postDiscussionCommentFromContext(githubClient, run.github, finalResponse.trim())
+              } else {
+                await githubClient.octokit.issues.createComment({
+                  owner: run.github.owner,
+                  repo: run.github.repo,
+                  issue_number: run.github.issueNumber,
+                  body: finalResponse.trim()
+                })
+              }
+            } catch (error) {
+              logger.warn({ err: error, runId: run.id }, "GitHub final answer comment failed")
+            }
+          }
         }
         const message = formatFinalSummary(run, finalResponse || "No changes detected", undefined)
         await finalize(run, "no_changes", message, updateStatus, githubClient, slackClient)
@@ -134,7 +174,10 @@ export function createRunner(params: {
 
       if (!run.github || !githubClient) {
         await store.updateRunStatus(run.id, "failed")
-        if (run.github && githubClient) {
+        void vibeAgents?.sendRunStatus(run, "failed", {
+          summary: "Missing GitHub context for PR creation"
+        })
+        if (run.github && githubClient && !discussionTarget) {
           await syncIssueLifecycleState(githubClient, run.github, "idle")
         }
         const message = formatFinalSummary(run, "Missing GitHub context for PR creation", undefined)
@@ -151,17 +194,26 @@ export function createRunner(params: {
         title: buildPrTitle(run),
         head: branchName,
         base: baseBranch,
-        body: buildPrBody(run, finalResponse)
+        body: buildPrBody(run, finalResponse, discussionTarget)
       })
 
       await store.updateRunPr(run.id, pr.data.number, pr.data.html_url)
       await store.updateRunStatus(run.id, "succeeded")
-      await syncIssueLifecycleState(githubClient, run.github, "completed")
+      void vibeAgents?.sendRunStatus(run, "succeeded", {
+        summary: finalResponse || "Completed",
+        prUrl: pr.data.html_url
+      })
+      if (!discussionTarget) {
+        await syncIssueLifecycleState(githubClient, run.github, "completed")
+      }
       const message = formatFinalSummary(run, finalResponse || "Completed", pr.data.html_url)
       await finalize(run, "succeeded", message, updateStatus, githubClient, slackClient)
     } catch (error) {
       await store.updateRunStatus(run.id, "failed")
-      if (run.github && githubClient) {
+      void vibeAgents?.sendRunStatus(run, "failed", {
+        summary: error instanceof Error ? error.message : String(error)
+      })
+      if (run.github && githubClient && !discussionTarget) {
         await syncIssueLifecycleState(githubClient, run.github, "idle")
       }
       tracker.pushLine(error instanceof Error ? error.message : String(error))
@@ -241,8 +293,8 @@ function buildPrTitle(run: RunRecord): string {
   return "Codex: changes"
 }
 
-function buildPrBody(run: RunRecord, summary: string): string {
-  const issue = run.github?.issueNumber ? `Closes #${run.github.issueNumber}` : ""
+function buildPrBody(run: RunRecord, summary: string, discussionTarget: boolean): string {
+  const issue = run.github?.issueNumber && !discussionTarget ? `Closes #${run.github.issueNumber}` : ""
   return [issue, summary].filter(Boolean).join("\n\n")
 }
 
@@ -264,7 +316,13 @@ async function finalize(
       }
     }
   }
-  if (run.github && githubClient && run.github.commentId) {
+  if (run.github && githubClient && isDiscussionSourceKey(run.sourceKey)) {
+    try {
+      await postDiscussionCommentFromContext(githubClient, run.github, message)
+    } catch (error) {
+      logger.warn({ err: error, runId: run.id }, "GitHub discussion final post failed")
+    }
+  } else if (run.github && githubClient && run.github.commentId) {
     try {
       await githubClient.octokit.issues.updateComment({
         owner: run.github.owner,
@@ -285,4 +343,45 @@ async function getGitHubClient(run: RunRecord, env: RunnerEnv) {
     privateKey: formatPrivateKey(env.githubPrivateKey),
     installationId: run.github.installationId
   })
+}
+
+async function resolveDisabledMcpServersConfig(codexPath?: string): Promise<Record<string, { enabled: boolean }>> {
+  const key = codexPath ?? "codex"
+  let cached = disabledMcpServersCache.get(key)
+  if (!cached) {
+    cached = discoverMcpServerOverrides(codexPath)
+    disabledMcpServersCache.set(key, cached)
+  }
+  return cached
+}
+
+async function discoverMcpServerOverrides(codexPath?: string): Promise<Record<string, { enabled: boolean }>> {
+  const executable = codexPath ?? "codex"
+  try {
+    const { stdout } = await execa(executable, ["mcp", "list"], {
+      timeout: 5000
+    })
+    const names = parseMcpServerNames(stdout)
+    return Object.fromEntries(names.map(name => [name, { enabled: false }]))
+  } catch (error) {
+    logger.warn({ err: error, executable }, "Failed to discover MCP servers; skipping MCP overrides")
+    return {}
+  }
+}
+
+function parseMcpServerNames(output: string): string[] {
+  const names = new Set<string>()
+  for (const rawLine of output.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line) continue
+    if (line.toLowerCase().startsWith("name")) continue
+
+    const columns = line.split(/\s{2,}|\t+/).filter(Boolean)
+    if (columns.length < 2) continue
+
+    const name = columns[0]?.trim()
+    if (!name) continue
+    names.add(name)
+  }
+  return [...names]
 }

@@ -23,6 +23,12 @@ const memoryState: MemoryState = {
   handlers: new Set()
 }
 
+function scheduleMemoryQueue() {
+  void processMemoryQueue().catch(error => {
+    logger.error(error, "Memory queue processing crashed")
+  })
+}
+
 async function processMemoryQueue() {
   if (memoryState.processing) return
   memoryState.processing = true
@@ -40,6 +46,11 @@ async function processMemoryQueue() {
     }
   } finally {
     memoryState.processing = false
+    // A job may be enqueued while `processing` is still true but the loop is
+    // already exiting. Kick the processor again to avoid stranded jobs.
+    if (memoryState.jobs.length > 0) {
+      scheduleMemoryQueue()
+    }
   }
 }
 
@@ -55,7 +66,7 @@ export function createQueue(redisUrl?: string, mode?: QueueMode) {
     const queue: RunQueue = {
       add: async (_name: string, job: RunJob) => {
         memoryState.jobs.push(job)
-        void processMemoryQueue()
+        scheduleMemoryQueue()
       }
     }
     return {
@@ -78,7 +89,7 @@ export function startWorker(redisUrl: string | undefined, handler: (job: RunJob)
   const resolved = resolveMode(redisUrl, mode)
   if (resolved === "memory") {
     memoryState.handlers.add(handler)
-    void processMemoryQueue()
+    scheduleMemoryQueue()
     return {
       worker: {
         close: async () => {
