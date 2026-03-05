@@ -21,7 +21,7 @@
   "dependencies": {
     "@octokit/app": "^15.0.3",
     "@octokit/rest": "^21.0.0",
-    "@openai/codex-sdk": "file:../codex/sdk/typescript",
+    "@openai/codex-sdk": "^0.110.0",
     "@slack/bolt": "^3.19.0",
     "@slack/web-api": "^7.13.0",
     "better-sqlite3": "^11.6.0",
