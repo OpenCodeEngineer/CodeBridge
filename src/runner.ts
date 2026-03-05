@@ -123,7 +123,11 @@ export function createRunner(params: {
       })
       const thread = codex.startThread({
         workingDirectory: run.repoPath,
-        model: run.model
+        model: run.model,
+        // The bridge must be able to create/edit files and push branches.
+        sandboxMode: "workspace-write",
+        // Auto-approve all commands; the bridge is fully autonomous.
+        approvalPolicy: "never",
       })
 
       let seq = 0
@@ -144,27 +148,11 @@ export function createRunner(params: {
         void vibeAgents?.sendRunStatus(run, "no_changes", {
           summary: finalResponse.trim() || "No changes detected"
         })
-        if (run.github && githubClient) {
-          if (!discussionTarget) {
-            await syncIssueLifecycleState(githubClient, run.github, "completed")
-          }
-          if (run.github.issueNumber && finalResponse.trim()) {
-            try {
-              if (discussionTarget) {
-                await postDiscussionCommentFromContext(githubClient, run.github, finalResponse.trim())
-              } else {
-                await githubClient.octokit.issues.createComment({
-                  owner: run.github.owner,
-                  repo: run.github.repo,
-                  issue_number: run.github.issueNumber,
-                  body: finalResponse.trim()
-                })
-              }
-            } catch (error) {
-              logger.warn({ err: error, runId: run.id }, "GitHub final answer comment failed")
-            }
-          }
+        if (run.github && githubClient && !discussionTarget) {
+          await syncIssueLifecycleState(githubClient, run.github, "completed")
         }
+        // finalize() updates the existing status comment (or posts to discussion)
+        // with the final summary — no separate comment needed.
         const message = formatFinalSummary(run, finalResponse || "No changes detected", undefined)
         await finalize(run, "no_changes", message, updateStatus, githubClient, slackClient)
         return
