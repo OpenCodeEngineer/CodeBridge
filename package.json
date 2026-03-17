@@ -11,12 +11,20 @@
     "start": "node dist/index.js",
     "build": "tsc -p tsconfig.json",
     "lint": "eslint . --max-warnings=0",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "test:github-polling": "tsx scripts/test-github-polling.ts",
     "test:github-protocol": "tsx scripts/test-github-protocol.ts",
+    "test:github-assignment-evidence": "tsx scripts/collect-github-assignment-evidence.ts",
+    "test:codex-session-relay": "tsx scripts/test-codex-session-relay.ts",
     "test:vibe-agents": "tsx scripts/test-vibe-agents.ts",
     "eval": "env -u GITHUB_TOKEN -u AZURE_OPENAI_BASE_URL promptfoo eval",
     "eval:serial": "env -u GITHUB_TOKEN -u AZURE_OPENAI_BASE_URL promptfoo eval -j 1",
-    "eval:view": "promptfoo view"
+    "eval:requirements": "env -u GITHUB_TOKEN -u AZURE_OPENAI_BASE_URL promptfoo eval --config promptfooconfig-requirements.yaml",
+    "eval:requirements:serial": "env -u GITHUB_TOKEN -u AZURE_OPENAI_BASE_URL promptfoo eval --config promptfooconfig-requirements.yaml -j 1",
+    "eval:view": "promptfoo view",
+    "eval:strict-codexengineer": "bun scripts/eval-openclaw.ts --app-handle @codexengineer --assignment-handle @codexengineer",
+    "eval:codex-native": "bun scripts/eval-openclaw.ts --app-handle @codexengineer --assignment-handle @openai-code-agent"
   },
   "dependencies": {
     "@octokit/app": "^15.0.3",
@@ -49,6 +57,7 @@
     "globals": "^15.8.0",
     "promptfoo": "^0.120.26",
     "tsx": "^4.16.2",
-    "typescript": "^5.5.3"
+    "typescript": "^5.5.3",
+    "vitest": "^4.0.18"
   }
 }

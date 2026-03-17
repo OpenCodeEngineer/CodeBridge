@@ -103,6 +103,16 @@ async function waitForBotReply(opts: {
   return { body: "(no reply within timeout)", timedOut: true };
 }
 
+async function getIssueLabels(repo: string, issueNumber: number): Promise<string[]> {
+  try {
+    const raw = await gh(["api", `repos/${repo}/issues/${issueNumber}`]);
+    const issue: { labels?: Array<{ name?: string }> } = JSON.parse(raw);
+    return (issue.labels ?? []).map(l => l.name ?? "").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 async function getPrDiff(repo: string, issueNumber: number): Promise<string | null> {
   try {
     const raw = await gh(["api", `repos/${repo}/issues/${issueNumber}/timeline?per_page=100`]);
@@ -219,7 +229,10 @@ export default class CodeBridgeProvider implements ApiProvider {
     // 5. Fetch PR diff if any
     const diff = await getPrDiff(this.repo, issueNumber);
 
-    // 6. Build combined output for the judge
+    // 6. Fetch final labels
+    const labels = await getIssueLabels(this.repo, issueNumber);
+
+    // 7. Build combined output for the judge
     const parts = [
       `## Bot Response`,
       reply.body,
@@ -227,13 +240,16 @@ export default class CodeBridgeProvider implements ApiProvider {
     if (diff) {
       parts.push("", `## PR Diff`, "```diff", diff, "```");
     }
+    if (labels.length > 0) {
+      parts.push("", `## Issue Labels`, labels.map(l => `- ${l}`).join("\n"));
+    }
     if (reply.timedOut) {
       parts.push("", `**WARNING**: Bot reply timed out after ${this.timeoutSec}s (partial output above)`);
     }
 
     const output = parts.join("\n");
 
-    // 7. Cleanup
+    // 8. Cleanup
     if (this.closeIssues) {
       try { await gh(["issue", "close", String(issueNumber), "--repo", this.repo]); } catch { /* ok */ }
     }
@@ -246,6 +262,7 @@ export default class CodeBridgeProvider implements ApiProvider {
         timedOut: reply.timedOut,
         hasPR: !!diff,
         triggerMode,
+        labels,
       },
     };
   }

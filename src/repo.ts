@@ -1,5 +1,6 @@
 import path from "node:path"
 import { access } from "node:fs/promises"
+import { execa } from "execa"
 import type { AppConfig, RepoConfig, TenantConfig } from "./types.js"
 
 export type TenantRepoMatch = {
@@ -50,6 +51,24 @@ export function findTenantRepoByPath(config: AppConfig, cwd: string): TenantRepo
   return bestMatch
 }
 
+export async function findTenantRepoByGitRemote(config: AppConfig, cwd: string): Promise<TenantRepoMatch | null> {
+  try {
+    const { stdout } = await execa("git", ["-C", cwd, "remote", "-v"], {
+      timeout: 5000
+    })
+    const remotes = stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+    for (const remote of remotes) {
+      const fullName = parseGitHubFullNameFromRemote(remote)
+      if (!fullName) continue
+      const match = findTenantRepoByFullName(config, fullName)
+      if (match) return match
+    }
+  } catch {
+    return null
+  }
+  return null
+}
+
 export function resolveRepo(tenant: TenantConfig, repoHint?: string): RepoConfig | null {
   if (repoHint) {
     const match = tenant.repos.find(r => r.fullName.toLowerCase() === repoHint.toLowerCase())
@@ -77,4 +96,15 @@ function pathContains(basePath: string, candidate: string): boolean {
   if (candidate === basePath) return true
   const suffix = process.platform === "win32" ? "\\" : "/"
   return candidate.startsWith(basePath.endsWith(suffix) ? basePath : `${basePath}${suffix}`)
+}
+
+export function parseGitHubFullNameFromRemote(remoteLine: string): string | null {
+  const parts = remoteLine.split(/\s+/)
+  if (parts.length < 2) return null
+  const remoteUrl = parts[1]
+  const httpsMatch = remoteUrl.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i)
+  if (httpsMatch) return `${httpsMatch[1]}/${httpsMatch[2]}`
+  const sshMatch = remoteUrl.match(/github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/i)
+  if (sshMatch) return `${sshMatch[1]}/${sshMatch[2]}`
+  return null
 }

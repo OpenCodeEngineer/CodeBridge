@@ -1,8 +1,9 @@
 import { Probot, createNodeMiddleware } from "probot"
 import type { Express } from "express"
-import { extractCommand, extractCommandFromManagedIssue, type CommandType } from "./commands.js"
+import type { CommandType } from "./commands.js"
 import { findTenantByGithubInstallation, findTenantByRepoFullName, resolveRepo } from "./repo.js"
 import type { AppConfig, GitHubContext, TenantConfig } from "./types.js"
+import type { RunStore } from "./storage.js"
 import { logger } from "./logger.js"
 import { formatPrivateKey } from "./github-auth.js"
 import {
@@ -11,6 +12,9 @@ import {
   resolveDefaultGithubCommandPrefixes,
   resolveGithubAppIdentity
 } from "./command-prefixes.js"
+import { dispatchSessionRelay, resolveSessionIdFromIssue } from "./codex-session-relay.js"
+import { routeDiscussionCommentCommand, routeIssueCommentCommand, shouldRelayManagedIssueCommand } from "./github-routing.js"
+import { postControlAck, postDiscussionUnsupportedControl, postIssueStatus } from "./github-controls.js"
 
 export type GitHubCommandHandler = (input: {
   tenantId: string
@@ -23,10 +27,13 @@ export type GitHubCommandHandler = (input: {
 
 export function createGitHubApp(
   config: AppConfig,
+  store: RunStore,
   env: {
     githubAppId?: number
     githubPrivateKey?: string
     githubWebhookSecret?: string
+    codexPath?: string
+    codexTurnTimeoutMs: number
   },
   onCommand: GitHubCommandHandler
 ) {
@@ -54,9 +61,12 @@ export function createGitHubApp(
       const repoFullName = context.payload.repository.full_name
       const defaultTenant = findTenantByGithubInstallation(config, installationId) ?? findTenantByRepoFullName(config, repoFullName)
       if (!defaultTenant?.github) return
+      const authorLogin = context.payload.comment.user?.login
+      if (context.payload.comment.user?.type === "Bot" || authorLogin?.toLowerCase().endsWith("[bot]")) return
 
       if (defaultTenant.github.repoAllowlist && !defaultTenant.github.repoAllowlist.includes(repoFullName)) return
 
+      const issueManaged = hasManagedLabel(context.payload.issue.labels)
       const defaultPrefixes = await defaultPrefixesPromise
       const assigneePrefixes = buildAssigneeMentionPrefixes(defaultTenant.github.assignmentAssignees)
       const prefixes = mergeGithubCommandPrefixes(
@@ -64,22 +74,84 @@ export function createGitHubApp(
         defaultPrefixes
       )
       const body = context.payload.comment.body ?? ""
-      const issueManaged = hasManagedLabel(context.payload.issue.labels)
-      const command = extractCommand(body, prefixes) ?? (issueManaged ? extractCommandFromManagedIssue(body) : null)
+      const command = routeIssueCommentCommand({
+        body,
+        prefixes,
+        issueManaged
+      })
       if (!command) return
-      if (command.type !== "run" && command.type !== "reply") return
 
-      const tenant = resolveTargetTenant({
+      const tenantResult = resolveTargetTenant({
         config,
         defaultTenant,
         tenantHint: command.tenantHint,
         installationId,
         repoFullName
       })
-      if (!tenant) return
+      if (!tenantResult.success) {
+        await context.octokit.issues.createComment({
+          owner: context.payload.repository.owner.login,
+          repo: context.payload.repository.name,
+          issue_number: context.payload.issue.number,
+          body: buildTenantErrorComment(tenantResult.error, tenantResult.validTenantIds)
+        })
+        return
+      }
 
+      const tenant = tenantResult.tenant
       const repo = resolveRepo(tenant, repoFullName)
       if (!repo) return
+
+      if (command.type === "status") {
+        await postIssueStatus({
+          tenantId: tenant.id,
+          repoFullName: repo.fullName,
+          issueNumber: context.payload.issue.number,
+          owner: context.payload.repository.owner.login,
+          repo: context.payload.repository.name,
+          client: context.octokit as any,
+          store
+        })
+        return
+      }
+
+      if (command.type === "pause" || command.type === "resume") {
+        await postControlAck({
+          commandType: command.type,
+          issueNumber: context.payload.issue.number,
+          owner: context.payload.repository.owner.login,
+          repo: context.payload.repository.name,
+          client: context.octokit as any
+        })
+        return
+      }
+
+      if (issueManaged) {
+        const sessionId = await resolveIssueSessionId(context)
+        if (sessionId && shouldRelayManagedIssueCommand({ issueManaged, command })) {
+          const relay = dispatchSessionRelay({
+            sessionId,
+            owner: context.payload.repository.owner.login,
+            repo: context.payload.repository.name,
+            issueNumber: context.payload.issue.number,
+            commentId: context.payload.comment.id,
+            commentBody: context.payload.comment.body ?? "",
+            authorLogin,
+            repoPath: repo.path,
+            codexPath: env.codexPath,
+            codexTurnTimeoutMs: env.codexTurnTimeoutMs,
+            postIssueComment: async (body) => {
+              await context.octokit.issues.createComment({
+                owner: context.payload.repository.owner.login,
+                repo: context.payload.repository.name,
+                issue_number: context.payload.issue.number,
+                body
+              })
+            }
+          })
+          if (relay.accepted) return
+        }
+      }
 
       const issue = context.payload.issue
       const sourceKey = [
@@ -115,6 +187,8 @@ export function createGitHubApp(
       const repoFullName = context.payload.repository.full_name
       const defaultTenant = findTenantByGithubInstallation(config, installationId) ?? findTenantByRepoFullName(config, repoFullName)
       if (!defaultTenant?.github) return
+      const authorLogin = context.payload.comment.user?.login
+      if (context.payload.comment.user?.type === "Bot" || authorLogin?.toLowerCase().endsWith("[bot]")) return
 
       if (defaultTenant.github.repoAllowlist && !defaultTenant.github.repoAllowlist.includes(repoFullName)) return
 
@@ -125,21 +199,40 @@ export function createGitHubApp(
         defaultPrefixes
       )
       const body = context.payload.comment.body ?? ""
-      const command = extractCommand(body, prefixes)
+      const command = routeDiscussionCommentCommand({
+        body,
+        prefixes
+      })
       if (!command) return
-      if (command.type !== "run" && command.type !== "reply") return
 
-      const tenant = resolveTargetTenant({
+      const tenantResult = resolveTargetTenant({
         config,
         defaultTenant,
         tenantHint: command.tenantHint,
         installationId,
         repoFullName
       })
-      if (!tenant) return
+      if (!tenantResult.success) {
+        logger.warn(
+          { error: tenantResult.error, validTenantIds: tenantResult.validTenantIds },
+          "Cannot post error comment to discussion (GraphQL required) - tenant resolution failed"
+        )
+        return
+      }
 
+      const tenant = tenantResult.tenant
       const repo = resolveRepo(tenant, repoFullName)
       if (!repo) return
+
+      if (command.type === "pause" || command.type === "resume" || command.type === "status") {
+        await postDiscussionUnsupportedControl({
+          owner: context.payload.repository.owner.login,
+          repo: context.payload.repository.name,
+          discussionNumber: context.payload.discussion.number,
+          client: context.octokit as any
+        })
+        return
+      }
 
       const discussion = context.payload.discussion
       const sourceKey = [
@@ -226,19 +319,50 @@ export function createGitHubApp(
   return { probot, mount }
 }
 
+async function resolveIssueSessionId(context: any): Promise<string | null> {
+  const owner = context.payload.repository.owner.login
+  const repo = context.payload.repository.name
+  const issueNumber = context.payload.issue.number
+  const issueBody = context.payload.issue.body ?? undefined
+
+  return resolveSessionIdFromIssue({
+    issueBody,
+    fetchComments: async () => {
+      const comments = await context.octokit.issues.listComments({
+        owner,
+        repo,
+        issue_number: issueNumber,
+        per_page: 100
+      })
+      return comments.data
+    }
+  })
+}
+
+type TenantResolutionResult =
+  | { success: true; tenant: TenantConfig }
+  | { success: false; error: string; validTenantIds: string[] }
+
 function resolveTargetTenant(input: {
   config: AppConfig
   defaultTenant: TenantConfig
   tenantHint?: string
   installationId?: number
   repoFullName: string
-}): TenantConfig | null {
-  if (!input.tenantHint) return input.defaultTenant
+}): TenantResolutionResult {
+  if (!input.tenantHint) return { success: true, tenant: input.defaultTenant }
+
+  const githubTenants = input.config.tenants.filter(t => t.github)
+  const validTenantIds = githubTenants.map(t => t.id)
 
   const target = input.config.tenants.find(t => t.id.toLowerCase() === input.tenantHint?.toLowerCase())
   if (!target?.github) {
     logger.warn({ tenantHint: input.tenantHint }, "Ignoring command: tenant hint did not match any GitHub-enabled tenant")
-    return null
+    return {
+      success: false,
+      error: `Tenant \`${input.tenantHint}\` not found or not configured for GitHub.`,
+      validTenantIds
+    }
   }
 
   if (input.installationId && target.github.installationId && target.github.installationId !== input.installationId) {
@@ -247,7 +371,11 @@ function resolveTargetTenant(input: {
       installationId: input.installationId,
       tenantInstallationId: target.github.installationId
     }, "Ignoring command: tenant hint installation mismatch")
-    return null
+    return {
+      success: false,
+      error: `Tenant \`${input.tenantHint}\` is not available for this GitHub App installation.`,
+      validTenantIds
+    }
   }
 
   const repoMatch = target.repos.some(repo => repo.fullName.toLowerCase() === input.repoFullName.toLowerCase())
@@ -256,7 +384,11 @@ function resolveTargetTenant(input: {
       tenantHint: input.tenantHint,
       repoFullName: input.repoFullName
     }, "Ignoring command: tenant hint repo mismatch")
-    return null
+    return {
+      success: false,
+      error: `Tenant \`${input.tenantHint}\` is not configured for repository \`${input.repoFullName}\`.`,
+      validTenantIds
+    }
   }
 
   if (target.github.repoAllowlist && !target.github.repoAllowlist.some(repo => repo.toLowerCase() === input.repoFullName.toLowerCase())) {
@@ -264,10 +396,29 @@ function resolveTargetTenant(input: {
       tenantHint: input.tenantHint,
       repoFullName: input.repoFullName
     }, "Ignoring command: tenant hint blocked by repo allowlist")
-    return null
+    return {
+      success: false,
+      error: `Tenant \`${input.tenantHint}\` cannot be used with repository \`${input.repoFullName}\` (blocked by allowlist).`,
+      validTenantIds
+    }
   }
 
-  return target
+  return { success: true, tenant: target }
+}
+
+function buildTenantErrorComment(error: string, validTenantIds: string[]): string {
+  const tenantList = validTenantIds.length > 0
+    ? validTenantIds.map(id => `- \`@${id}\``).join("\n")
+    : "_(No GitHub-enabled tenants configured)_"
+
+  return `❌ **Tenant Resolution Failed**
+
+${error}
+
+**Valid tenant IDs for this repository:**
+${tenantList}
+
+To specify a tenant, use: \`@tenant-id your command here\``
 }
 
 function hasManagedLabel(labels?: Array<{ name?: string } | string>): boolean {
@@ -290,11 +441,43 @@ function buildIssueBootstrapPrompt(issueNumber: number, title: string, body?: st
 
 function resolveAssignmentAssignees(configured: string[] | undefined, botLogin?: string): Set<string> {
   const values = new Set<string>()
-  if (botLogin) values.add(botLogin.trim().toLowerCase())
+  const addAssignee = (raw: string | undefined) => {
+    const normalized = normalizeAssigneeLogin(raw)
+    if (!normalized) return
+    for (const candidate of expandAssigneeAliases(normalized)) {
+      values.add(candidate)
+    }
+  }
+
+  addAssignee(botLogin)
   for (const value of configured ?? []) {
-    const normalized = value.trim().toLowerCase()
-    if (!normalized) continue
-    values.add(normalized)
+    addAssignee(value)
   }
   return values
+}
+
+function normalizeAssigneeLogin(value: string | undefined): string {
+  return (value ?? "").trim().toLowerCase().replace(/^@/, "")
+}
+
+function expandAssigneeAliases(login: string): string[] {
+  const values = new Set<string>()
+  if (!login) return []
+  values.add(login)
+
+  if (login.endsWith("[bot]")) {
+    values.add(login.replace(/\[bot\]$/i, ""))
+  }
+
+  const aliasMap = new Map<string, string[]>([
+    ["openai-code-agent", ["codex"]],
+    ["codex", ["openai-code-agent"]],
+    ["copilot-swe-agent", ["copilot"]],
+    ["copilot", ["copilot-swe-agent"]]
+  ])
+  for (const alias of aliasMap.get(login) ?? []) {
+    values.add(alias)
+  }
+
+  return [...values]
 }

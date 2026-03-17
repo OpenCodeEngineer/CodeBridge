@@ -6,7 +6,7 @@ Local coding agents are hard to coordinate from terminal-only interfaces. The re
 
 ## Primary Goal
 
-Make GitHub Issues behave like a chat surface with Codex:
+Make GitHub issue and PR conversation threads behave like a chat surface with Codex, while keeping discussion support explicit:
 
 - bootstrap once using a native app mention
 - continue conversation using plain human comments
@@ -29,9 +29,12 @@ Make GitHub Issues behave like a chat surface with Codex:
 
 ### R2. Conversational Mode After Bootstrap
 
-- Once an issue is marked as agent-managed, plain human comments on that issue are treated as follow-up prompts.
+- Once an issue or PR conversation thread is marked as agent-managed, plain human comments on that managed thread are treated as follow-up prompts.
 - Follow-up comments must not require command prefixes (`codex:`, `/codex`, etc.).
 - Mentioning the app remains allowed but optional after bootstrap.
+- Discussion follow-up remains explicit-command only: each follow-up must still mention the app or use a configured prefix.
+- Explicit `status`, `pause`, and `resume` commands must work on managed issue and PR conversation threads without being misrouted as normal follow-up text.
+- On discussions, `status`, `pause`, and `resume` must return an unsupported-surface message rather than silently doing nothing.
 
 ### R3. Tenant Targeting
 
@@ -42,11 +45,15 @@ Make GitHub Issues behave like a chat surface with Codex:
   2. existing issue/session binding
   3. repo-to-tenant default mapping
 - If no valid tenant can be resolved, bridge must post an actionable error comment.
+- For GitHub-originated commands, repo selection inside the chosen tenant must use exact `repository.full_name` matching against `repos[].fullName`.
+- `defaultRepo` must not remap one GitHub repository event onto a different configured repository.
+- The configured local `repos[].path` must exist before a run is enqueued; otherwise the bridge must fail fast with actionable diagnostics.
 
 ### R4. Issue Association
 
-- If the prompt references an issue (`#123`, `owner/repo#123`, or GitHub URL), that issue is used.
-- If no issue is referenced and the run starts from non-issue entrypoints, bridge auto-creates an issue and binds the session.
+- If the prompt references an issue (`#123`, `owner/repo#123`, or GitHub URL), that issue is used when the entrypoint supports issue association.
+- If no issue is referenced and the run starts from non-GitHub entrypoints (for example Slack or `/codex/notify`), bridge auto-creates an issue and binds the session.
+- GitHub-originated issue, PR, and discussion commands stay bound to their source thread; they do not auto-create a secondary issue today.
 
 ### R5. Status Lifecycle on Issue
 
@@ -63,7 +70,7 @@ Make GitHub Issues behave like a chat surface with Codex:
 ### R6. Comment Mirroring
 
 - For each processed user turn, bridge must post:
-  - user prompt comment (if not already mirrored for the turn)
+  - user prompt comment (if not already present on that surface for the turn)
   - assistant response comment
 - Bridge must avoid duplicate comments for the same turn.
 
@@ -100,7 +107,8 @@ Make GitHub Issues behave like a chat surface with Codex:
 ## Acceptance Criteria
 
 - A user can open GitHub Issue UI and interact with Codex as if chatting with a user.
-- First interaction uses assignment-to-app or app mention; later messages on the managed issue can be plain text.
+- First interaction uses assignment-to-app or app mention; later messages on the managed issue or PR conversation thread can be plain text.
+- Discussion follow-up remains explicit mention/prefix based.
 - `tenant:<id>` reliably routes commands to the desired tenant.
 - Issue labels reflect run state transitions.
 - Assistant responses are posted by the app bot account.

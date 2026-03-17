@@ -2,22 +2,26 @@ import type { AppConfig, RepoConfig, TenantConfig } from "./types.js"
 import type { RunStore } from "./storage.js"
 import type { RunService } from "./run-service.js"
 import { createInstallationClient, formatPrivateKey } from "./github-auth.js"
-import { extractCommand, extractCommandFromManagedIssue, type CommandType } from "./commands.js"
+import type { CommandType } from "./commands.js"
 import {
   buildAssigneeMentionPrefixes,
   mergeGithubCommandPrefixes,
   resolveDefaultGithubCommandPrefixes,
   resolveGithubAppIdentity
 } from "./command-prefixes.js"
-import { postDiscussionCommentByNumber } from "./github-discussions.js"
+import { routeDiscussionCommentCommand, routeIssueCommentCommand } from "./github-routing.js"
+import { postControlAck, postDiscussionUnsupportedControl, postIssueStatus } from "./github-controls.js"
 import { ensureRepoPath } from "./repo.js"
 import { logger } from "./logger.js"
+import { dispatchSessionRelay, resolveSessionIdFromIssue } from "./codex-session-relay.js"
 
 export type GitHubPollEnv = {
   githubAppId?: number
   githubPrivateKey?: string
   githubPollIntervalSec: number
   githubPollBackfill: boolean
+  codexPath?: string
+  codexTurnTimeoutMs: number
 }
 
 type GitHubClient = Awaited<ReturnType<typeof createInstallationClient>>
@@ -38,6 +42,8 @@ export function startGitHubPolling(params: {
   }
 
   const intervalMs = Math.max(10000, env.githubPollIntervalSec * 1000)
+  const repoPollTimeoutMs = 30_000
+  const clientTimeoutMs = 15_000
   logger.info({ intervalSec: env.githubPollIntervalSec }, "GitHub polling enabled")
   let running = false
   const tokenTtlMs = 50 * 60 * 1000
@@ -52,11 +58,30 @@ export function startGitHubPolling(params: {
       for (const tenant of config.tenants) {
         if (!tenant.github?.installationId) continue
         const installationId = tenant.github.installationId
-        const client = await getClient(installationId)
+        const client = await withTimeout(
+          getClient(installationId),
+          clientTimeoutMs,
+          `GitHub installation client bootstrap timed out for installation ${installationId}`
+        ).catch(error => {
+          logger.warn({ err: error, tenantId: tenant.id, installationId }, "Skipping tenant: GitHub client unavailable")
+          return null
+        })
         if (!client) continue
 
         for (const repo of tenant.repos) {
-          await pollRepo(tenant, repo, client)
+          try {
+            await withTimeout(
+              pollRepo(tenant, repo, client),
+              repoPollTimeoutMs,
+              `GitHub polling timed out for ${repo.fullName}`
+            )
+          } catch (error) {
+            logger.warn({
+              err: error,
+              tenantId: tenant.id,
+              repoFullName: repo.fullName
+            }, "Skipping repo after polling timeout/failure")
+          }
         }
       }
     } catch (error) {
@@ -142,6 +167,15 @@ export function startGitHubPolling(params: {
       ? await resolveDefaultPrefixesWithTimeout(defaultPrefixesPromise)
       : []
     const issueMetaByNumber = new Map<number, { title: string; body?: string; managed: boolean }>()
+    const issueSessionByNumber = new Map<number, string | null>()
+    let resolvedRepoPath: string | null = null
+
+    const getRepoPath = async () => {
+      if (!resolvedRepoPath) {
+        resolvedRepoPath = await ensureRepoPath(repo)
+      }
+      return resolvedRepoPath
+    }
 
     const getIssueMeta = async (issueNumber: number) => {
       const cached = issueMetaByNumber.get(issueNumber)
@@ -161,6 +195,26 @@ export function startGitHubPolling(params: {
       return meta
     }
 
+    const getIssueSessionId = async (issueNumber: number, issueBody?: string) => {
+      const cached = issueSessionByNumber.get(issueNumber)
+      if (cached !== undefined) return cached
+
+      const resolved = await resolveSessionIdFromIssue({
+        issueBody,
+        fetchComments: async () => {
+          const comments = await client.octokit.issues.listComments({
+            owner,
+            repo: repoName,
+            issue_number: issueNumber,
+            per_page: 100
+          })
+          return comments.data
+        }
+      })
+      issueSessionByNumber.set(issueNumber, resolved)
+      return resolved
+    }
+
     for (const comment of pending) {
       try {
         if (!comment.body) continue
@@ -169,27 +223,77 @@ export function startGitHubPolling(params: {
         const issueNumber = parseIssueNumber(comment.issue_url)
         if (!issueNumber) continue
 
+        const issueMeta = await getIssueMeta(issueNumber)
+        if (issueMeta.managed) {
+          const sessionId = await getIssueSessionId(issueNumber, issueMeta.body)
+          if (sessionId) {
+            const relay = dispatchSessionRelay({
+              sessionId,
+              owner,
+              repo: repoName,
+              issueNumber,
+              commentId: comment.id,
+              commentBody: comment.body,
+              authorLogin: comment.user?.login ?? undefined,
+              repoPath: await getRepoPath(),
+              codexPath: env.codexPath,
+              codexTurnTimeoutMs: env.codexTurnTimeoutMs,
+              postIssueComment: async (body) => {
+                await client.octokit.issues.createComment({
+                  owner,
+                  repo: repoName,
+                  issue_number: issueNumber,
+                  body
+                })
+              }
+            })
+            if (relay.accepted) continue
+          }
+        }
+
         const assigneePrefixes = buildAssigneeMentionPrefixes(tenant.github?.assignmentAssignees)
         const prefixes = mergeGithubCommandPrefixes(
           assigneePrefixes,
           defaultPrefixes
         )
-        const explicitCommand = extractCommand(comment.body, prefixes)
-        const managedCommand = explicitCommand
-          ? explicitCommand
-          : (() => {
-              const loose = extractCommandFromManagedIssue(comment.body)
-              if (!loose) return null
-              const withReplyDefault = loose.type === "run" ? { ...loose, type: "reply" as const } : loose
-              return withReplyDefault
-            })()
-        let command = managedCommand
-        if (!explicitCommand && command) {
-          const issueMeta = await getIssueMeta(issueNumber)
-          if (!issueMeta.managed) command = null
-        }
+        const command = routeIssueCommentCommand({
+          body: comment.body,
+          prefixes,
+          issueManaged: issueMeta.managed
+        })
         if (!command) continue
-        if (command.tenantHint && command.tenantHint.toLowerCase() !== tenant.id.toLowerCase()) continue
+
+        if (command.tenantHint) {
+          const hintLower = command.tenantHint.toLowerCase()
+          const tenantMatches = hintLower === tenant.id.toLowerCase()
+
+          if (!tenantMatches) {
+            const allGithubTenants = config.tenants.filter(t => t.github)
+            const validTenantIds = allGithubTenants.map(t => t.id)
+            const isValidHint = allGithubTenants.some(t => t.id.toLowerCase() === hintLower)
+
+            if (!isValidHint) {
+              const tenantList = validTenantIds.length > 0
+                ? validTenantIds.map(id => `- \`@${id}\``).join("\n")
+                : "_(No GitHub-enabled tenants configured)_"
+
+              await client.octokit.issues.createComment({
+                owner,
+                repo: repoName,
+                issue_number: issueNumber,
+                body: `❌ **Tenant Resolution Failed**
+
+Tenant \`${command.tenantHint}\` not found or not configured for GitHub.
+
+**Valid tenant IDs for this repository:**
+${tenantList}
+
+To specify a tenant, use: \`@tenant-id your command here\``
+              })
+            }
+            continue
+          }
+        }
 
         if (command.type === "status") {
           await postIssueStatus({
@@ -225,9 +329,8 @@ export function startGitHubPolling(params: {
         const existing = await store.getRunBySourceKey(sourceKey)
         if (existing) continue
 
-        const issue = await getIssueMeta(issueNumber)
-
-        const repoPath = await ensureRepoPath(repo)
+        const issue = issueMeta
+        const repoPath = await getRepoPath()
         const prompt = command.type === "reply"
           ? buildReplyPrompt(issueNumber, command.prompt)
           : command.prompt
@@ -272,6 +375,19 @@ export function startGitHubPolling(params: {
   return () => clearInterval(timer)
 }
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeoutId: NodeJS.Timeout | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs)
+  })
+
+  try {
+    return await Promise.race([promise, timeout])
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId)
+  }
+}
+
 async function pollAssignedIssues(input: {
   tenant: TenantConfig
   repo: RepoConfig
@@ -286,6 +402,7 @@ async function pollAssignedIssues(input: {
   const assignees = resolveAssignmentAssignees(input.tenant.github?.assignmentAssignees, appIdentity?.botLogin)
   if (assignees.length === 0) return
 
+  const assigneeSet = new Set(assignees.map(value => value.toLowerCase()))
   const issuesByNumber = new Map<number, {
     number: number
     title: string
@@ -294,37 +411,38 @@ async function pollAssignedIssues(input: {
     labels: Array<{ name?: string } | string>
   }>()
 
-  for (const assignee of assignees) {
-    let response: Awaited<ReturnType<typeof input.client.octokit.issues.listForRepo>>
-    try {
-      response = await input.client.octokit.issues.listForRepo({
-        owner: input.owner,
-        repo: input.repoName,
-        state: "open",
-        assignee,
-        per_page: 100,
-        sort: "updated",
-        direction: "desc"
-      })
-    } catch (error) {
-      logger.warn({
-        err: error,
-        tenantId: input.tenant.id,
-        repoFullName: input.repo.fullName,
-        assignee
-      }, "Skipping invalid assignment assignee in polling")
-      continue
-    }
-    for (const issue of response.data) {
-      if (!issue.number || issuesByNumber.has(issue.number)) continue
-      issuesByNumber.set(issue.number, {
-        number: issue.number,
-        title: issue.title,
-        body: issue.body ?? null,
-        pull_request: issue.pull_request,
-        labels: issue.labels as Array<{ name?: string } | string>
-      })
-    }
+  let response: Awaited<ReturnType<typeof input.client.octokit.issues.listForRepo>>
+  try {
+    response = await input.client.octokit.issues.listForRepo({
+      owner: input.owner,
+      repo: input.repoName,
+      state: "open",
+      per_page: 100,
+      sort: "updated",
+      direction: "desc"
+    })
+  } catch (error) {
+    logger.warn({
+      err: error,
+      tenantId: input.tenant.id,
+      repoFullName: input.repo.fullName
+    }, "GitHub assignment polling list failed")
+    return
+  }
+
+  for (const issue of response.data) {
+    const issueAssignees = (issue.assignees ?? [])
+      .map(entry => entry?.login?.toLowerCase())
+      .filter((value): value is string => Boolean(value))
+    if (!issueAssignees.some(login => assigneeSet.has(login))) continue
+    if (!issue.number || issuesByNumber.has(issue.number)) continue
+    issuesByNumber.set(issue.number, {
+      number: issue.number,
+      title: issue.title,
+      body: issue.body ?? null,
+      pull_request: issue.pull_request,
+      labels: issue.labels as Array<{ name?: string } | string>
+    })
   }
 
   for (const issue of issuesByNumber.values()) {
@@ -499,16 +617,19 @@ async function pollDiscussionComments(input: {
         assigneePrefixes,
         defaultPrefixes
       )
-      const command = extractCommand(comment.body, prefixes)
+      const command = routeDiscussionCommentCommand({
+        body: comment.body,
+        prefixes
+      })
       if (!command) continue
       if (command.tenantHint && command.tenantHint.toLowerCase() !== input.tenant.id.toLowerCase()) continue
 
       if (command.type === "pause" || command.type === "resume" || command.type === "status") {
-        await postDiscussionCommentByNumber(input.client, {
+        await postDiscussionUnsupportedControl({
           owner: input.owner,
           repo: input.repoName,
           discussionNumber: comment.discussionNumber,
-          body: "This command is currently supported on issues/PR threads only. Use `run` or `reply` in discussions."
+          client: input.client
         })
         continue
       }
@@ -568,12 +689,43 @@ async function pollDiscussionComments(input: {
 
 function resolveAssignmentAssignees(configured: string[] | undefined, botLogin?: string): string[] {
   const values = new Set<string>()
-  if (botLogin) values.add(botLogin.trim().toLowerCase())
-  for (const value of configured ?? []) {
-    const normalized = value.trim().toLowerCase()
-    if (!normalized) continue
-    values.add(normalized)
+  const addAssignee = (raw: string | undefined) => {
+    const normalized = normalizeAssigneeLogin(raw)
+    if (!normalized) return
+    for (const candidate of expandAssigneeAliases(normalized)) {
+      values.add(candidate)
+    }
   }
+  addAssignee(botLogin)
+  for (const value of configured ?? []) {
+    addAssignee(value)
+  }
+  return [...values]
+}
+
+function normalizeAssigneeLogin(value: string | undefined): string {
+  return (value ?? "").trim().toLowerCase().replace(/^@/, "")
+}
+
+function expandAssigneeAliases(login: string): string[] {
+  const values = new Set<string>()
+  if (!login) return []
+  values.add(login)
+
+  if (login.endsWith("[bot]")) {
+    values.add(login.replace(/\[bot\]$/i, ""))
+  }
+
+  const aliasMap = new Map<string, string[]>([
+    ["openai-code-agent", ["codex"]],
+    ["codex", ["openai-code-agent"]],
+    ["copilot-swe-agent", ["copilot"]],
+    ["copilot", ["copilot-swe-agent"]]
+  ])
+  for (const alias of aliasMap.get(login) ?? []) {
+    values.add(alias)
+  }
+
   return [...values]
 }
 
@@ -655,58 +807,6 @@ function buildSourceKey(input: {
     input.commentId,
     input.commandType
   ].join(":")
-}
-
-async function postIssueStatus(input: {
-  tenantId: string
-  repoFullName: string
-  issueNumber: number
-  owner: string
-  repo: string
-  client: GitHubClient
-  store: RunStore
-}) {
-  const latest = await input.store.getLatestRunForIssue({
-    tenantId: input.tenantId,
-    repoFullName: input.repoFullName,
-    issueNumber: input.issueNumber
-  })
-
-  const body = latest
-    ? [
-      `Agent status for issue #${input.issueNumber}`,
-      `- Run: \`${latest.id}\``,
-      `- Status: \`${latest.status}\``,
-      `- Updated: ${latest.updatedAt}`,
-      latest.prUrl ? `- PR: ${latest.prUrl}` : "- PR: none"
-    ].join("\n")
-    : `No agent run found for issue #${input.issueNumber}.`
-
-  await input.client.octokit.issues.createComment({
-    owner: input.owner,
-    repo: input.repo,
-    issue_number: input.issueNumber,
-    body
-  })
-}
-
-async function postControlAck(input: {
-  commandType: "pause" | "resume"
-  issueNumber: number
-  owner: string
-  repo: string
-  client: GitHubClient
-}) {
-  const body = input.commandType === "pause"
-    ? "Pause command acknowledged. Runtime pause is not implemented yet in this bridge."
-    : "Resume command acknowledged. Runtime resume is not implemented yet in this bridge."
-
-  await input.client.octokit.issues.createComment({
-    owner: input.owner,
-    repo: input.repo,
-    issue_number: input.issueNumber,
-    body
-  })
 }
 
 function hasManagedLabel(labels?: Array<{ name?: string } | string>): boolean {

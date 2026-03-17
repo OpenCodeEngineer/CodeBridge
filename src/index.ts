@@ -55,22 +55,17 @@ const main = async () => {
 
   if (env.role === "all" || env.role === "api") {
     const app = express()
-    app.use(express.json({ limit: "1mb" }))
 
     app.get("/health", (_req, res) => {
       res.json({ status: "ok" })
     })
-    app.post("/codex/notify", createCodexNotifyHandler({
-      config,
-      githubAppId: secrets.githubAppId,
-      githubPrivateKey: secrets.githubPrivateKey,
-      ingestToken: secrets.codexNotifyToken
-    }))
 
-    const github = createGitHubApp(config, {
+    const github = createGitHubApp(config, store, {
       githubAppId: secrets.githubAppId,
       githubPrivateKey: secrets.githubPrivateKey,
-      githubWebhookSecret: secrets.githubWebhookSecret
+      githubWebhookSecret: secrets.githubWebhookSecret,
+      codexPath: env.codexPath,
+      codexTurnTimeoutMs: env.codexTurnTimeoutMs
     }, async input => {
       const tenant = config.tenants.find(t => t.id === input.tenantId)
       if (!tenant) return
@@ -93,6 +88,16 @@ const main = async () => {
       })
     })
     if (github) github.mount(app)
+
+    // Keep webhook payload raw for signature verification by Probot middleware.
+    app.use(express.json({ limit: "1mb" }))
+
+    app.post("/codex/notify", createCodexNotifyHandler({
+      config,
+      githubAppId: secrets.githubAppId,
+      githubPrivateKey: secrets.githubPrivateKey,
+      ingestToken: secrets.codexNotifyToken
+    }))
 
     await app.listen(env.port)
     logger.info({ port: env.port }, "API server started")
@@ -131,7 +136,9 @@ const main = async () => {
         githubAppId: secrets.githubAppId,
         githubPrivateKey: secrets.githubPrivateKey,
         githubPollIntervalSec: env.githubPollIntervalSec,
-        githubPollBackfill: env.githubPollBackfill
+        githubPollBackfill: env.githubPollBackfill,
+        codexPath: env.codexPath,
+        codexTurnTimeoutMs: env.codexTurnTimeoutMs
       }
     })
   }

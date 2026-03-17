@@ -1,0 +1,181 @@
+# CodeBridge Requirements Eval — promptfoo configuration
+# Tests CodeBridge-specific GitHub integration requirements (R1-R6)
+#
+# Usage:
+#   pnpm eval          # run all cases
+#   pnpm eval:serial   # serial (one issue at a time)
+#   pnpm eval:view     # open results UI
+#
+# Prerequisites:
+#   - CodeBridge server running (pnpm dev or pnpm start)
+#   - gh CLI authenticated (gh auth status)
+#   - Test repository configured in config.yaml
+#   - AZURE_OPENAI_API_KEY set in env
+
+description: "CodeBridge — GitHub Integration Requirements (R1-R6)"
+
+providers:
+  - id: file://eval/provider.ts
+    config:
+      repo: dzianisv/codebridge-test
+      botLogin: "codexengineer[bot]"
+      mentionHandle: "@codexengineer"
+      timeoutSec: 300
+      pollSec: 10
+      closeIssues: true
+
+defaultTest:
+  options:
+    provider:
+      id: azure:chat:gpt-4.1
+      config:
+        apiHost: vibebrowser-dev.openai.azure.com
+        apiVersion: "2024-10-01-preview"
+
+prompts:
+  - "{{task}}"
+
+tests:
+  # ── R1: Assignment Bootstrap ────────────────────────────────────────
+  - description: "R1: Assignment bootstrap triggers bot"
+    vars:
+      title: "Test assignment bootstrap"
+      task: >
+        Create a file called test-assignment.txt with content "Assignment bootstrap works".
+        This issue should trigger via assignment, not mention.
+    assert:
+      - type: llm-rubric
+        value: |
+          The bot MUST respond to assignment-based bootstrap and create the requested file.
+          Look for: bot comment indicating work started, PR with test-assignment.txt.
+          Score 1.0 = file created via assignment trigger, 0.5 = bot responded but incomplete,
+          0.0 = no bot response or wrong trigger mechanism.
+
+  # ── R1: Mention Bootstrap (Issue) ──────────────────────────────────
+  - description: "R1: Mention bootstrap in issue comment"
+    vars:
+      title: "Test mention bootstrap in issue"
+      task: >
+        @codexengineer Create a file called test-mention-issue.txt with content "Mention bootstrap in issue works".
+    assert:
+      - type: llm-rubric
+        value: |
+          The bot MUST respond to @mention in issue comment and create the file.
+          Look for: bot comment with work status, PR with test-mention-issue.txt.
+          Score 1.0 = file created via mention trigger, 0.5 = responded but incomplete,
+          0.0 = no response or failed to trigger from mention.
+
+  # ── R2: Conversational Follow-up ───────────────────────────────────
+  - description: "R2: Plain follow-up comment without prefix"
+    vars:
+      title: "Test conversational mode"
+      task: >
+        @codexengineer Create a file called conversation.txt with content "Step 1".
+
+        After you complete this, I will post a plain follow-up comment (no @mention needed)
+        asking you to modify the file to say "Step 2" instead. This tests R2 requirement
+        that managed issues accept plain text follow-ups without command prefixes.
+    assert:
+      - type: llm-rubric
+        value: |
+          The bot MUST accept a plain follow-up comment without @mention or prefix.
+          Look for: initial file creation with "Step 1", then a follow-up that changes it to "Step 2"
+          based on plain text comment. Label should be agent:managed after bootstrap.
+          Score 1.0 = both steps complete with plain follow-up, 0.5 = only first step,
+          0.0 = failed or didn't accept plain follow-up.
+    # Note: This test requires manual follow-up or enhanced provider logic
+
+  # ── R3: Tenant Targeting (Happy Path) ──────────────────────────────
+  - description: "R3: Explicit tenant hint works"
+    vars:
+      title: "Test tenant targeting"
+      task: >
+        tenant:local @codexengineer Create a file called tenant-test.txt with content "Tenant targeting works".
+
+        This tests that explicit tenant hints are parsed and applied correctly.
+    assert:
+      - type: llm-rubric
+        value: |
+          The bot MUST honor the tenant:local hint and create the file.
+          Look for: bot response, file created, no tenant resolution errors.
+          Score 1.0 = tenant resolved and file created, 0.5 = warning but proceeded,
+          0.0 = tenant error or no response.
+
+  # ── R3: Tenant Targeting (Error Path) ──────────────────────────────
+  - description: "R3: Invalid tenant hint posts error comment"
+    vars:
+      title: "Test tenant error handling"
+      task: >
+        tenant:invalid-tenant-xyz @codexengineer Create a file.
+
+        This should trigger a tenant resolution error with actionable guidance listing valid tenant IDs.
+    assert:
+      - type: llm-rubric
+        value: |
+          The bot MUST post an error comment explaining that tenant:invalid-tenant-xyz is not valid,
+          and MUST list valid tenant IDs. The bot should NOT create any file.
+          Look for: error comment with "Tenant Resolution Failed" and list of valid tenants.
+          Score 1.0 = clear error with valid tenant list, 0.5 = error but vague,
+          0.0 = no error comment or bot proceeded anyway.
+
+  # ── R5: Label Lifecycle ─────────────────────────────────────────────
+  - description: "R5: Labels track lifecycle (managed, in-progress, completed)"
+    vars:
+      title: "Test label lifecycle"
+      task: >
+        @codexengineer Create a file called lifecycle.txt with content "Testing labels".
+
+        Verify that labels transition: agent:managed -> agent:in-progress -> agent:completed.
+    assert:
+      - type: llm-rubric
+        value: |
+          The issue MUST show lifecycle labels at appropriate times:
+          - agent:managed after bootstrap
+          - agent:in-progress while working
+          - agent:completed when done
+          Look for: label transitions in issue events, final state with agent:completed.
+          Score 1.0 = all three labels present at correct times, 0.7 = partial labels,
+          0.0 = no labels or wrong labels.
+
+  # ── R6: Comment Mirroring ───────────────────────────────────────────
+  - description: "R6: Bot mirrors user prompt and assistant response"
+    vars:
+      title: "Test comment mirroring"
+      task: >
+        @codexengineer Create a file called mirror.txt with content "Mirroring test".
+
+        Verify that the bot posts distinct comments for:
+        1. Acknowledging/mirroring the user prompt
+        2. The assistant's response/completion
+
+        Comments should include turn markers and avoid duplicates.
+    assert:
+      - type: llm-rubric
+        value: |
+          The bot MUST post separate comments for user turn and assistant response.
+          Look for: turn markers (e.g., "Turn N"), distinct user/assistant comments, no duplicates.
+          Score 1.0 = proper mirroring with turn markers, 0.5 = mirrored but missing markers,
+          0.0 = no mirroring or duplicate comments.
+
+  # ── Integration: Multi-step workflow ───────────────────────────────
+  - description: "Integration: Assignment + follow-up + completion labels"
+    vars:
+      title: "Full workflow integration test"
+      task: >
+        Create a file called workflow.txt with content "Initial".
+
+        This tests a complete workflow:
+        1. Assign to bot (R1)
+        2. Bot creates file and applies agent:managed label (R5)
+        3. Follow-up comment to change content to "Updated" (R2)
+        4. Bot applies agent:completed when done (R5)
+    assert:
+      - type: llm-rubric
+        value: |
+          This test verifies end-to-end integration:
+          - Assignment bootstrap triggers work (R1)
+          - Labels transition correctly (R5)
+          - Plain follow-up accepted (R2)
+          - Final state is agent:completed
+          Score 1.0 = all steps complete with correct labels, 0.7 = mostly working,
+          0.5 = partial completion, 0.0 = failed at bootstrap or follow-up.

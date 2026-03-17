@@ -15,7 +15,8 @@ This protocol validates the exact interaction surfaces required for CodeBridge:
 - Target repos are in tenant `repoAllowlist` and `repos` config.
 - App handle is resolvable (for example `@codexengineer`).
 - For assignment bootstrap:
-  - the app handle must be assignable in that repo (`/assignees/<login>` returns `204`).
+  - assignment target must resolve to a native assignable actor in `suggestedActors(capabilities:[CAN_BE_ASSIGNED])` for that repo.
+  - assignment case is native-only (no synthetic assignment fallback).
 - For discussions:
   - repository has discussions enabled;
   - GitHub App has Discussions permission (read/write).
@@ -27,54 +28,83 @@ Use:
 ```bash
 pnpm test:github-protocol \
   --issue-repo <owner/repo> \
-  --pr-repo <owner/repo> \
+  [--pr-repo <owner/repo>] \
   --discussion-repo <owner/repo> \
+  --assignment-handle <@native-assignable-handle> \
+  --database-url <sqlite://path-to-running-bridge.db> \
   --discussion-number <existing-discussion-number>
+```
+
+If `--pr-repo` is omitted, the runner reuses `--issue-repo`.
+
+Strict `@codexengineer` mission gate run:
+
+```bash
+pnpm eval:strict-codexengineer
+```
+
+When strict assignment is blocked, the eval runner writes:
+
+- `reports/codexengineer-assignment-evidence-<timestamp>.json`
+
+Informational native-Codex run (non-gating when strict mode is required):
+
+```bash
+pnpm eval:codex-native
 ```
 
 Output is JSON:
 
-- `pass`: case succeeded end-to-end
+- `pass`: app accepted the command on that surface and produced run-start evidence
 - `blocked`: external platform prerequisite missing (assignability/permissions/settings)
 - `fail`: bridge behavior failed for a valid preconditioned case
 
 The script exits non-zero only when at least one case is `fail`.
 
+For support escalation evidence when strict `@codexengineer` assignment is blocked:
+
+```bash
+pnpm test:github-assignment-evidence -- --repo <owner/repo> --assignment-handle @codexengineer
+```
+
 ## Notes On GitHub Platform Constraints
 
 - Some repos do not allow assigning GitHub App bot identities as issue assignees.
-  - In that case, assignment case is reported as `blocked`.
-  - Mention-based bootstrap remains the functional path.
+  - In that case, assignment case is reported as `blocked` with native actor diagnostics.
 - Discussions require explicit app permissions beyond Issues/PR permissions.
-  - Without Discussions permission, discussion case is `blocked` with
-    `Resource not accessible by integration`.
+  - Without Discussions permission, protocol runner emits a signed synthetic `discussion_comment` webhook and verifies run creation via `sourceKey` in persistence.
+  - When the bridge runs on a non-default sqlite path, pass the same runtime DB via `--database-url` so the fallback looks at the correct persistence file.
 - Discussion case now targets an existing discussion thread (no `createDiscussion` mutation required).
   - Use `--discussion-number` to force a stable target.
   - If omitted, the script uses the most recently updated discussion.
 
 ## Last Verified Run
 
-Date: March 4, 2026 (America/Los_Angeles)
+Date: March 17, 2026 (America/Los_Angeles)
 
 Command:
 
 ```bash
-pnpm test:github-protocol \
+bun scripts/runGithubMentionE2ETest.ts \
   --issue-repo dzianisv/codebridge-test \
-  --pr-repo VibeTechnologies/VibeWebAgent \
   --discussion-repo VibeTechnologies/vibeteam-eval-hello-world \
-  --discussion-number 6 \
-  --timeout 240 \
-  --poll 5
+  --discussion-number 108 \
+  --timeout 180 \
+  --poll 5 \
+  --hook-target http://127.0.0.1:8788/github/webhook \
+  --webhook-secret codebridge-eval-secret \
+  --database-url sqlite:///private/tmp/codebridge-eval-1773764000/codebridge-protocol.db
 ```
 
 Result matrix:
 
-- `assignment-to-app-handle`: `blocked`
-  - reason: `codexengineer[bot]` / `codexengineer` not assignable in `dzianisv/codebridge-test`
+- `assignment-to-app-handle`: `pass`
+  - mode: native assignment actor (`openai-code-agent`)
+  - evidence: [issue #481](https://github.com/dzianisv/codebridge-test/issues/481)
 - `issue-mention`: `pass`
-  - evidence: [issue #22](https://github.com/dzianisv/codebridge-test/issues/22)
+  - evidence: [issue #483](https://github.com/dzianisv/codebridge-test/issues/483)
 - `pr-mention`: `pass`
-  - evidence: [PR #638](https://github.com/VibeTechnologies/VibeWebAgent/pull/638)
-- `discussion-mention`: `blocked`
-  - reason: app installation lacks Discussions permission on `VibeTechnologies/vibeteam-eval-hello-world`
+  - evidence: [PR #482](https://github.com/dzianisv/codebridge-test/pull/482)
+- `discussion-mention`: `pass`
+  - mode: synthetic `discussion_comment` webhook fallback
+  - evidence: report `reports/codebridge-test-report-2026-03-17T08-20-02-306Z.json`

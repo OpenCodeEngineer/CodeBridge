@@ -2,9 +2,10 @@ import type { RequestHandler } from "express"
 import { createInstallationClient, formatPrivateKey, type InstallationClient } from "./github-auth.js"
 import { syncIssueLifecycleState } from "./github-issue-state.js"
 import type { AppConfig, GitHubContext } from "./types.js"
-import { findTenantRepoByFullName, findTenantRepoByPath, type TenantRepoMatch } from "./repo.js"
+import { findTenantRepoByFullName, findTenantRepoByGitRemote, findTenantRepoByPath, type TenantRepoMatch } from "./repo.js"
 import { parseIssueReference } from "./commands.js"
 import { logger } from "./logger.js"
+import { registerSessionBinding } from "./codex-session-relay.js"
 
 const MANAGED_LABEL = "agent:managed"
 const IN_PROGRESS_LABEL = "agent:in-progress"
@@ -12,6 +13,7 @@ const CLIENT_TTL_MS = 50 * 60 * 1000
 
 type SessionBinding = {
   repoFullName: string
+  repoPath: string
   github: GitHubContext
   createdIssue: boolean
 }
@@ -71,7 +73,7 @@ export function createCodexNotifyHandler(params: {
         return
       }
 
-      const repoMatch = findTenantRepoByPath(config, normalized.cwd)
+      const repoMatch = await findTenantRepoByGitRemote(config, normalized.cwd) ?? findTenantRepoByPath(config, normalized.cwd)
       if (!repoMatch) {
         res.status(400).json({ error: `No configured repo matched cwd: ${normalized.cwd}` })
         return
@@ -90,6 +92,12 @@ export function createCodexNotifyHandler(params: {
         throw new Error("Session binding is missing GitHub issue context")
       }
       const issueNumber = github.issueNumber
+      registerSessionBinding({
+        sessionId: normalized.sessionId,
+        repoFullName: binding.repoFullName,
+        repoPath: binding.repoPath,
+        github
+      })
 
       const client = await getClient(github.installationId)
       await withConsistencyRetry(() => syncIssueLifecycleState(client, github, "in-progress"))
@@ -210,7 +218,7 @@ async function getOrCreateBinding(input: {
         client.octokit.issues.create({
           owner: defaultOwner,
           repo: defaultRepo,
-          title: buildIssueTitle(firstPrompt),
+          title: buildIssueTitle(firstPrompt, normalized.sessionId),
           body: buildIssueBody(firstPrompt, normalized.sessionId),
           labels: [MANAGED_LABEL, IN_PROGRESS_LABEL]
         })
@@ -230,6 +238,7 @@ async function getOrCreateBinding(input: {
 
   const binding: SessionBinding = {
     repoFullName: `${github.owner}/${github.repo}`,
+    repoPath: normalized.cwd,
     github,
     createdIssue
   }
@@ -329,12 +338,12 @@ function hasAnyMarker(comments: Array<{ body?: string | null }>, markers: string
   return markers.some(marker => hasMarker(comments, marker))
 }
 
-function buildIssueTitle(prompt: string): string {
+function buildIssueTitle(prompt: string, sessionId: string): string {
   const firstLine = prompt
     .split("\n")
     .map(line => line.trim())
     .find(Boolean) ?? "Codex task"
-  return truncate(firstLine, 120)
+  return truncate(`[session:${sessionId}] ${firstLine}`, 120)
 }
 
 function buildIssueBody(prompt: string, sessionId: string): string {
@@ -486,4 +495,20 @@ function isTransientNodeResolutionError(error: unknown): boolean {
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+// Exported for testing
+export const _testHelpers = {
+  normalizeTurnPayload,
+  buildIssueTitle,
+  buildIssueBody,
+  buildUserPromptComment,
+  buildAssistantComment,
+  sessionMarker,
+  sessionMarkerVariants,
+  turnMarker,
+  turnMarkerVariants,
+  truncate,
+  isLoopbackAddress,
+  isLoopbackRequest
 }

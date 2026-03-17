@@ -1,4 +1,4 @@
-import type { InstallationClient } from "./github-auth.js"
+import { resolveGitHubOctokit, type GitHubApiClient } from "./github-api.js"
 import type { GitHubContext } from "./types.js"
 
 const discussionIdCache = new Map<string, string>()
@@ -9,7 +9,7 @@ export function isDiscussionSourceKey(sourceKey?: string): boolean {
 }
 
 export async function postDiscussionCommentFromContext(
-  client: InstallationClient,
+  client: GitHubApiClient,
   github: GitHubContext,
   body: string
 ): Promise<void> {
@@ -26,7 +26,7 @@ export async function postDiscussionCommentFromContext(
 }
 
 export async function postDiscussionCommentByNumber(
-  client: InstallationClient,
+  client: GitHubApiClient,
   input: {
     owner: string
     repo: string
@@ -34,13 +34,14 @@ export async function postDiscussionCommentByNumber(
     body: string
   }
 ): Promise<void> {
-  const discussionId = await resolveDiscussionNodeId(client, {
+  const octokit = resolveGitHubOctokit(client)
+  const discussionId = await resolveDiscussionNodeId(octokit, {
     owner: input.owner,
     repo: input.repo,
     discussionNumber: input.discussionNumber
   })
 
-  await client.octokit.graphql(
+  await octokit.graphql(
     `
       mutation AddDiscussionComment($discussionId: ID!, $body: String!) {
         addDiscussionComment(input: { discussionId: $discussionId, body: $body }) {
@@ -56,7 +57,7 @@ export async function postDiscussionCommentByNumber(
 }
 
 async function resolveDiscussionNodeId(
-  client: InstallationClient,
+  octokit: ReturnType<typeof resolveGitHubOctokit>,
   input: {
     owner: string
     repo: string
@@ -67,7 +68,7 @@ async function resolveDiscussionNodeId(
   const cached = discussionIdCache.get(cacheKey)
   if (cached) return cached
 
-  const response = await client.octokit.graphql<{
+  const response = await octokit.graphql<{
     repository: {
       discussion: {
         id: string

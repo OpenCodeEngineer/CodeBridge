@@ -57,7 +57,14 @@ const parseArgs = (argv: string[]): Args => {
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 const gh = async (args: string[]) => {
-  const result = await execa("gh", args, { stdio: ["ignore", "pipe", "pipe"] })
+  const env = { ...process.env }
+  delete env.GITHUB_TOKEN
+  delete env.GH_TOKEN
+  const result = await execa("gh", args, {
+    stdio: ["ignore", "pipe", "pipe"],
+    env,
+    extendEnv: false
+  })
   return result.stdout.trim()
 }
 
