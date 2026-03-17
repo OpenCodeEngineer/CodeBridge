@@ -74,11 +74,11 @@ const extractIssueNumber = (url: string): number => {
   return Number(match[1])
 }
 
-const isCodexComment = (body: string) => body.includes("Codex run")
+const isAgentComment = (body: string) => /\b(?:Codex|OpenCode)\s+run\b/.test(body)
 
 const isFinal = (body: string) => {
   const firstLine = body.split("\n")[0]?.trim().toLowerCase() ?? ""
-  if (/^codex run\s+\S+\s+complete$/.test(firstLine)) return true
+  if (/^(?:codex|opencode) run\s+\S+\s+complete$/.test(firstLine)) return true
 
   const statusMatch = body.match(/^\s*status:\s*([a-z-]+)/im)
   if (!statusMatch) return false
@@ -154,7 +154,7 @@ const main = async () => {
     const comments = JSON.parse(raw) as Array<{ id: number; body: string; created_at: string }>
     const recentCodex = comments
       .filter(comment => new Date(comment.created_at).getTime() >= startTime - 1000)
-      .filter(comment => isCodexComment(comment.body))
+      .filter(comment => isAgentComment(comment.body))
       .sort((a, b) => a.id - b.id)
     const latest = recentCodex[recentCodex.length - 1]
     if (latest && isFinal(latest.body)) {
@@ -168,7 +168,7 @@ const main = async () => {
     await sleep(args.pollSec * 1000)
   }
 
-  throw new Error("Timed out waiting for Codex run result")
+  throw new Error("Timed out waiting for backend run result")
 }
 
 main().catch(error => {

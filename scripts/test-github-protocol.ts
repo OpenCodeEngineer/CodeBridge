@@ -275,11 +275,13 @@ const parseIssueOrPrNumber = (url: string): number => {
   return Number(match[2])
 }
 
-const isCodexRunComment = (body: string) => body.toLowerCase().includes("codex run")
+const RUN_COMMENT_RE = /\b(?:codex|opencode)\s+run\b/i
+
+const isAgentRunComment = (body: string) => RUN_COMMENT_RE.test(body)
 
 const isTerminalBotComment = (body: string) => {
   const firstLine = body.split("\n")[0]?.trim().toLowerCase() ?? ""
-  if (/^codex run\s+\S+\s+complete$/.test(firstLine)) return true
+  if (/^(?:codex|opencode) run\s+\S+\s+complete$/.test(firstLine)) return true
   const statusMatch = body.match(/^\s*status:\s*([a-z-]+)/im)
   if (!statusMatch) return false
   const status = statusMatch[1].toLowerCase()
@@ -287,19 +289,21 @@ const isTerminalBotComment = (body: string) => {
 }
 
 // This protocol validates bootstrap surfaces (assignment/mentions). It intentionally
-// treats an acknowledged "Codex run" comment as success; promptfoo eval covers end-to-end completion quality.
+// treats an acknowledged backend run comment as success; promptfoo eval covers end-to-end completion quality.
 const waitForIssueBotComment = async (input: {
   repo: string
   issueNumber: number
   botLogins: string[]
   expectedSubstring?: string
   requireCompletion?: boolean
+  notBeforeMs?: number
   timeoutSec: number
   pollSec: number
 }) => {
   const deadline = Date.now() + input.timeoutSec * 1000
   const expected = input.expectedSubstring?.toLowerCase()
   const botLogins = new Set(input.botLogins.map(login => login.toLowerCase()))
+  const notBeforeMs = input.notBeforeMs ?? 0
 
   while (Date.now() < deadline) {
     const raw = await gh([
@@ -317,7 +321,11 @@ const waitForIssueBotComment = async (input: {
       .find(comment => {
         const rawBody = comment.body ?? ""
         const body = rawBody.toLowerCase()
-        if (!isCodexRunComment(rawBody)) {
+        const createdAtMs = Date.parse(comment.created_at ?? "")
+        if (Number.isFinite(createdAtMs) && createdAtMs < notBeforeMs - 1000) {
+          return false
+        }
+        if (!isAgentRunComment(rawBody)) {
           return false
         }
         if (input.requireCompletion && !isTerminalBotComment(rawBody)) {
@@ -339,6 +347,7 @@ const waitForDiscussionBotComment = async (input: {
   discussionNumber: number
   botLogins: string[]
   expectedSubstring: string
+  notBeforeMs?: number
   timeoutSec: number
   pollSec: number
 }) => {
@@ -346,6 +355,7 @@ const waitForDiscussionBotComment = async (input: {
   const deadline = Date.now() + input.timeoutSec * 1000
   const expected = input.expectedSubstring.toLowerCase()
   const botLogins = new Set(input.botLogins.map(login => login.toLowerCase()))
+  const notBeforeMs = input.notBeforeMs ?? 0
 
   while (Date.now() < deadline) {
     const raw = await gh([
@@ -374,13 +384,107 @@ const waitForDiscussionBotComment = async (input: {
     const comments = parsed.data?.repository?.discussion?.comments?.nodes ?? []
     const match = comments.find(comment =>
       botLogins.has((comment.author?.login ?? "").toLowerCase()) &&
-      (comment.body ?? "").toLowerCase().includes(expected)
+      (comment.body ?? "").toLowerCase().includes(expected) &&
+      (
+        !comment.createdAt ||
+        !Number.isFinite(Date.parse(comment.createdAt)) ||
+        Date.parse(comment.createdAt) >= notBeforeMs - 1000
+      )
     )
     if (match) return match
     await sleep(input.pollSec * 1000)
   }
 
   throw new Error(`Timed out waiting for discussion bot comment containing "${input.expectedSubstring}"`)
+}
+
+type OpenPullRequest = {
+  number: number
+  url: string
+}
+
+type ReviewablePullRequest = OpenPullRequest & {
+  commitId: string
+  path: string
+  line: number
+}
+
+const findFirstAddedLine = (patch: string | undefined): number | null => {
+  if (!patch) return null
+
+  let currentNewLine = 0
+  for (const line of patch.split("\n")) {
+    const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/)
+    if (hunk) {
+      currentNewLine = Number(hunk[1])
+      continue
+    }
+    if (line.startsWith("+++")) continue
+    if (line.startsWith("---")) continue
+    if (line.startsWith("+")) {
+      return currentNewLine
+    }
+    if (!line.startsWith("-")) {
+      currentNewLine += 1
+    }
+  }
+
+  return null
+}
+
+const selectReviewablePullRequest = async (repoFullName: string, openPrs: OpenPullRequest[]): Promise<ReviewablePullRequest | null> => {
+  for (const candidate of openPrs) {
+    const prRaw = await gh(["api", `repos/${repoFullName}/pulls/${candidate.number}`])
+    const pr = JSON.parse(prRaw) as {
+      head?: { sha?: string | null }
+    }
+    const commitId = (pr.head?.sha ?? "").trim()
+    if (!commitId) continue
+
+    const filesRaw = await gh(["api", `repos/${repoFullName}/pulls/${candidate.number}/files?per_page=100`])
+    const files = JSON.parse(filesRaw) as Array<{
+      filename?: string
+      patch?: string
+    }>
+
+    for (const file of files) {
+      const path = (file.filename ?? "").trim()
+      const line = findFirstAddedLine(file.patch)
+      if (!path || !line || line <= 0) continue
+      return {
+        ...candidate,
+        commitId,
+        path,
+        line
+      }
+    }
+  }
+
+  return null
+}
+
+const postPullRequestReviewComment = async (input: {
+  repoFullName: string
+  pullNumber: number
+  commitId: string
+  path: string
+  line: number
+  body: string
+}) => {
+  await gh([
+    "api",
+    `repos/${input.repoFullName}/pulls/${input.pullNumber}/comments`,
+    "-f",
+    `body=${input.body}`,
+    "-f",
+    `commit_id=${input.commitId}`,
+    "-f",
+    `path=${input.path}`,
+    "-F",
+    `line=${input.line}`,
+    "-f",
+    "side=RIGHT"
+  ])
 }
 
 const resolveRepoInstallationId = (repoFullName: string, config: Awaited<ReturnType<typeof loadConfig>>): number | undefined => {
@@ -427,7 +531,7 @@ const emitSyntheticDiscussionCommentWebhook = async (input: {
   discussionNumber: number
   commentId: number
   commentNodeId: string
-  appHandle: string
+  body: string
   hookTarget: string
   webhookSecret: string
   installationId?: number
@@ -448,7 +552,7 @@ const emitSyntheticDiscussionCommentWebhook = async (input: {
     comment: {
       id: input.commentId,
       node_id: input.commentNodeId,
-      body: `${input.appHandle} run Reply with exactly: discussion-ok`,
+      body: input.body,
       user: {
         login: "protocol-eval-user",
         type: "User"
@@ -576,6 +680,11 @@ const main = async () => {
   const discussionRepo = args.discussionRepo ?? defaultDiscussionRepo
 
   const results: CaseResult[] = []
+  const assignmentToken = `assignment-ok-${now}`
+  const issueToken = `issue-ok-${now}`
+  const prConversationToken = `pr-conversation-ok-${now}`
+  const prReviewToken = `pr-review-ok-${now}`
+  const discussionToken = `discussion-ok-${now}`
 
   // Case 1: issue assigned to @githubapphandle.
   const assignmentIssueUrl = await gh([
@@ -586,7 +695,7 @@ const main = async () => {
     "--title",
     `Protocol assignment test ${now}`,
     "--body",
-    "Reply with exactly: assignment-ok"
+    `Reply with exactly: ${assignmentToken}`
   ])
   const assignmentIssue = parseIssueOrPrNumber(assignmentIssueUrl)
   try {
@@ -607,6 +716,7 @@ const main = async () => {
         url: assignmentIssueUrl
       })
     } else {
+      const waitStart = Date.now()
       const before = await readIssueAssignmentState(issueRepo, assignmentIssue)
       if (!before.issueNodeId) {
         throw new Error(`Issue ${assignmentIssue} missing node_id; cannot run native assignment mutation`)
@@ -637,7 +747,9 @@ const main = async () => {
           repo: issueRepo,
           issueNumber: assignmentIssue,
           botLogins: acceptedBotLogins,
+          expectedSubstring: assignmentToken,
           requireCompletion: false,
+          notBeforeMs: waitStart,
           timeoutSec: args.timeoutSec,
           pollSec: args.pollSec
         })
@@ -682,6 +794,7 @@ const main = async () => {
   ])
   const issueNumber = parseIssueOrPrNumber(issueUrl)
   try {
+    const waitStart = Date.now()
     await gh([
       "issue",
       "comment",
@@ -689,13 +802,15 @@ const main = async () => {
       "--repo",
       issueRepo,
       "--body",
-      `${appHandle} run Reply with exactly: issue-ok`
+      `${appHandle} run Reply with exactly: ${issueToken}`
     ])
     await waitForIssueBotComment({
       repo: issueRepo,
       issueNumber,
       botLogins: acceptedBotLogins,
+      expectedSubstring: issueToken,
       requireCompletion: false,
+      notBeforeMs: waitStart,
       timeoutSec: args.timeoutSec,
       pollSec: args.pollSec
     })
@@ -747,6 +862,7 @@ const main = async () => {
     })
   } else {
     try {
+      const waitStart = Date.now()
       await gh([
         "pr",
         "comment",
@@ -754,14 +870,16 @@ const main = async () => {
         "--repo",
         prRepo,
         "--body",
-        `${appHandle} run Reply in one short sentence.`
+        `${appHandle} run Reply with exactly: ${prConversationToken}`
       ])
 
       await waitForIssueBotComment({
         repo: prRepo,
         issueNumber: targetPr.number,
         botLogins: acceptedBotLogins,
+        expectedSubstring: prConversationToken,
         requireCompletion: false,
+        notBeforeMs: waitStart,
         timeoutSec: args.timeoutSec,
         pollSec: args.pollSec
       })
@@ -782,7 +900,54 @@ const main = async () => {
     }
   }
 
-  // Case 4: @githubapphandle mention on GitHub discussion conversation.
+  // Case 4: @githubapphandle mention on GitHub PR review comments.
+  const reviewablePr = await selectReviewablePullRequest(prRepo, openPrs)
+  if (!reviewablePr) {
+    results.push({
+      name: "pr-review-mention",
+      status: "blocked",
+      details: `No open PRs with reviewable added lines available in ${prRepo} for PR review comment test.`
+    })
+  } else {
+    try {
+      const waitStart = Date.now()
+      await postPullRequestReviewComment({
+        repoFullName: prRepo,
+        pullNumber: reviewablePr.number,
+        commitId: reviewablePr.commitId,
+        path: reviewablePr.path,
+        line: reviewablePr.line,
+        body: `${appHandle} run Reply with exactly: ${prReviewToken}`
+      })
+
+      await waitForIssueBotComment({
+        repo: prRepo,
+        issueNumber: reviewablePr.number,
+        botLogins: acceptedBotLogins,
+        expectedSubstring: prReviewToken,
+        requireCompletion: false,
+        notBeforeMs: waitStart,
+        timeoutSec: args.timeoutSec,
+        pollSec: args.pollSec
+      })
+
+      results.push({
+        name: "pr-review-mention",
+        status: "pass",
+        details: `PR review comment command accepted with ${appHandle}.`,
+        url: reviewablePr.url
+      })
+    } catch (error) {
+      results.push({
+        name: "pr-review-mention",
+        status: "fail",
+        details: error instanceof Error ? error.message : String(error),
+        url: reviewablePr.url
+      })
+    }
+  }
+
+  // Case 5: @githubapphandle mention on GitHub discussion conversation.
   if (!discussionRepo) {
     results.push({
       name: "discussion-mention",
@@ -916,6 +1081,7 @@ const main = async () => {
         }
 
         if (!discussionBlockedReason && discussionId && discussionNumber) {
+          const waitStart = Date.now()
           await gh([
             "api",
             "graphql",
@@ -924,14 +1090,15 @@ const main = async () => {
             "-f",
             `discussionId=${discussionId}`,
             "-f",
-            `body=${appHandle} run Reply with exactly: discussion-ok`
+            `body=${appHandle} run Reply with exactly: ${discussionToken}`
           ])
 
           await waitForDiscussionBotComment({
             repo: discussionRepo,
             discussionNumber,
             botLogins: acceptedBotLogins,
-            expectedSubstring: "discussion-ok",
+            expectedSubstring: discussionToken,
+            notBeforeMs: waitStart,
             timeoutSec: args.timeoutSec,
             pollSec: args.pollSec
           })
@@ -988,7 +1155,7 @@ const main = async () => {
           discussionNumber: syntheticDiscussionNumber,
           commentId: syntheticCommentId,
           commentNodeId: syntheticNodeId,
-          appHandle,
+          body: `${appHandle} run Reply with exactly: ${discussionToken}`,
           hookTarget: args.hookTarget,
           webhookSecret: args.webhookSecret,
           installationId: discussionInstallationId

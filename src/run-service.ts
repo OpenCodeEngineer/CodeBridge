@@ -1,6 +1,6 @@
 import { nanoid } from "nanoid"
 import type { RunStore } from "./storage.js"
-import type { SlackContext, GitHubContext, RunRecord } from "./types.js"
+import type { AgentBackend, SlackContext, GitHubContext, RunRecord } from "./types.js"
 import type { WebClient } from "@slack/web-api"
 import { postSlackStatus } from "./slack.js"
 import { createInstallationClient, formatPrivateKey } from "./github-auth.js"
@@ -11,6 +11,7 @@ import { ProgressTracker } from "./progress.js"
 import type { RunQueue } from "./queue.js"
 import { logger } from "./logger.js"
 import type { VibeAgentsSink } from "./vibe-agents.js"
+import { resolveAgentBackend } from "./agent-backend.js"
 
 export type RunService = {
   createRun: (input: {
@@ -19,6 +20,8 @@ export type RunService = {
     repoPath: string
     sourceKey?: string
     prompt: string
+    backend?: AgentBackend
+    agent?: string
     model?: string
     branchPrefix?: string
     slack?: SlackContext
@@ -42,6 +45,8 @@ export function createRunService(params: {
     repoPath: string
     sourceKey?: string
     prompt: string
+    backend?: AgentBackend
+    agent?: string
     model?: string
     branchPrefix?: string
     slack?: SlackContext
@@ -90,6 +95,8 @@ export function createRunService(params: {
       repoPath: input.repoPath,
       sourceKey: input.sourceKey,
       prompt: input.prompt,
+      backend: resolveAgentBackend(input.backend),
+      agent: input.agent,
       model: input.model,
       branchPrefix: input.branchPrefix,
       slack: input.slack,
@@ -141,7 +148,7 @@ function buildIssueTitle(prompt: string): string {
   const firstLine = prompt
     .split("\n")
     .map(line => line.trim())
-    .find(Boolean) ?? "Codex task"
+    .find(Boolean) ?? "CodeBridge task"
   return truncate(firstLine, 120)
 }
 

@@ -6,6 +6,7 @@ secrets:
   # githubWebhookSecret: "optional-webhook-secret"
   # codexNotifyToken: "optional-notify-token"
   # vibeAgentsToken: "optional-vibe-agents-token"
+  # opencodePassword: "optional-opencode-password"
 
 integrations:
   # Optional external sink for agent session dashboards.
@@ -16,6 +17,13 @@ integrations:
     project: "VibeWebAgent"
     enabled: true
     timeoutMs: 8000
+  opencode:
+    baseUrl: "http://127.0.0.1:4096"
+    username: "opencode"
+    # password: "optional-inline-password"
+    enabled: true
+    timeoutMs: 300000
+    pollIntervalMs: 2000
 
 tenants:
   - id: local
@@ -37,7 +45,9 @@ tenants:
     repos:
       - fullName: "owner/repo"
         path: "/Users/engineer/workspace/opencode-manager"
-        model: "gpt-5.2-codex"
+        backend: "opencode"              # omit or set "codex" for local Codex SDK
+        agent: "build"                  # backend-specific; currently used by OpenCode
+        model: "openai/gpt-5"           # OpenCode expects provider/model
         baseBranch: "main"
-        branchPrefix: "codex"
+        branchPrefix: "opencode"
     defaultRepo: "owner/repo"

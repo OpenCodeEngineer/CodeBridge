@@ -2,11 +2,11 @@
 
 ## Problem Statement
 
-Local coding agents are hard to coordinate from terminal-only interfaces. The requirement is to use GitHub Issues as a native control plane so a human can operate Codex sessions from GitHub web/mobile without switching to local terminals.
+Local coding agents are hard to coordinate from terminal-only interfaces. The requirement is to use GitHub Issues as a native control plane so a human can operate CodeBridge-managed agent sessions from GitHub web/mobile without switching to local terminals.
 
 ## Primary Goal
 
-Make GitHub issue and PR conversation threads behave like a chat surface with Codex, while keeping discussion support explicit:
+Make GitHub issue and PR conversation threads behave like a chat surface with the configured coding agent backend, while keeping PR review comments and discussions explicit:
 
 - bootstrap once using a native app mention
 - continue conversation using plain human comments
@@ -22,6 +22,7 @@ Make GitHub issue and PR conversation threads behave like a chat surface with Co
 - A human can also start a run by mentioning the GitHub App in:
   - issue comments
   - PR conversation comments
+  - PR review comments
   - discussion comments
   - Example: `@CodexEngineer investigate flaky CI in this repo`
 - The bootstrap action must be treated as a run request without requiring CLI access.
@@ -32,8 +33,10 @@ Make GitHub issue and PR conversation threads behave like a chat surface with Co
 - Once an issue or PR conversation thread is marked as agent-managed, plain human comments on that managed thread are treated as follow-up prompts.
 - Follow-up comments must not require command prefixes (`codex:`, `/codex`, etc.).
 - Mentioning the app remains allowed but optional after bootstrap.
+- PR review comments remain explicit-command only: each follow-up must still mention the app or use a configured prefix, and responses are written back to the PR conversation thread.
 - Discussion follow-up remains explicit-command only: each follow-up must still mention the app or use a configured prefix.
 - Explicit `status`, `pause`, and `resume` commands must work on managed issue and PR conversation threads without being misrouted as normal follow-up text.
+- Explicit `status`, `pause`, and `resume` commands must also work from PR review comments when explicitly prefixed.
 - On discussions, `status`, `pause`, and `resume` must return an unsupported-surface message rather than silently doing nothing.
 
 ### R3. Tenant Targeting
@@ -48,6 +51,10 @@ Make GitHub issue and PR conversation threads behave like a chat surface with Co
 - For GitHub-originated commands, repo selection inside the chosen tenant must use exact `repository.full_name` matching against `repos[].fullName`.
 - `defaultRepo` must not remap one GitHub repository event onto a different configured repository.
 - The configured local `repos[].path` must exist before a run is enqueued; otherwise the bridge must fail fast with actionable diagnostics.
+- Repo backend selection is per configured repo:
+  - `repos[].backend` chooses the execution backend and defaults to `codex`
+  - `repos[].agent` stores backend-specific agent selection
+  - backend integrations receive the resolved `repos[].path`; they do not infer a repo or worktree from the GitHub mention, process cwd, or agent state
 
 ### R4. Issue Association
 
@@ -84,6 +91,7 @@ Make GitHub issue and PR conversation threads behave like a chat surface with Co
   - assignment-to-app-handle bootstrap
   - mention bootstrap in issue comment
   - mention bootstrap in PR conversation comment
+  - mention bootstrap in PR review comment
   - mention bootstrap in discussion comment
 - If a case cannot run due GitHub platform prerequisites (for example app assignability or missing app Discussion permissions), result must be reported as `blocked` with actionable reason.
 
@@ -106,9 +114,10 @@ Make GitHub issue and PR conversation threads behave like a chat surface with Co
 
 ## Acceptance Criteria
 
-- A user can open GitHub Issue UI and interact with Codex as if chatting with a user.
+- A user can open GitHub Issue UI and interact with the configured coding agent backend as if chatting with a user.
 - First interaction uses assignment-to-app or app mention; later messages on the managed issue or PR conversation thread can be plain text.
 - Discussion follow-up remains explicit mention/prefix based.
 - `tenant:<id>` reliably routes commands to the desired tenant.
+- Backend selection is deterministic per configured repo and still uses the exact configured local checkout path.
 - Issue labels reflect run state transitions.
 - Assistant responses are posted by the app bot account.

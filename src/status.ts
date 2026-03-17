@@ -1,9 +1,10 @@
 import type { RunRecord } from "./types.js"
 import type { ProgressSnapshot } from "./progress.js"
+import { getRunBackendLabel } from "./agent-backend.js"
 
 export function formatSlackStatus(run: RunRecord, snapshot: ProgressSnapshot, state: string): string {
   const lines = snapshot.lines.map(line => `- ${line}`).join("\n")
-  const header = `Codex run ${run.id} on ${run.repoFullName}`
+  const header = `${getRunBackendLabel(run)} run ${run.id} on ${run.repoFullName}`
   const branch = run.branchName ? `Branch: ${run.branchName}` : ""
   const body = lines ? `\n${lines}` : ""
   const status = `Status: ${state}`
@@ -14,7 +15,7 @@ export function formatSlackStatus(run: RunRecord, snapshot: ProgressSnapshot, st
 export function formatGitHubStatus(run: RunRecord, snapshot: ProgressSnapshot, state: string): string {
   const lines = snapshot.lines.map(line => `- ${line}`).join("\n")
   const branch = run.branchName ? `Branch: \`${run.branchName}\`` : ""
-  const header = `**Codex run ${run.id}**`
+  const header = `**${getRunBackendLabel(run)} run ${run.id}**`
   const status = `Status: ${state}`
   const agent = snapshot.lastAgentMessage ? `\nLatest: ${truncate(snapshot.lastAgentMessage, 600)}` : ""
   const body = lines ? `\n${lines}` : ""
@@ -22,7 +23,7 @@ export function formatGitHubStatus(run: RunRecord, snapshot: ProgressSnapshot, s
 }
 
 export function formatFinalSummary(run: RunRecord, summary: string, prUrl?: string): string {
-  const header = `Codex run ${run.id} complete`
+  const header = `${getRunBackendLabel(run)} run ${run.id} complete`
   const prLine = prUrl ? `PR: ${prUrl}` : "No PR created"
   return `${header}\n${prLine}\n${summary}`
 }

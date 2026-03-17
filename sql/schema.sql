@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS runs (
   source_key TEXT UNIQUE,
   status TEXT NOT NULL,
   prompt TEXT NOT NULL,
+  backend TEXT,
+  agent TEXT,
   model TEXT,
   branch_prefix TEXT,
   slack_channel TEXT,
@@ -40,6 +42,8 @@ CREATE INDEX IF NOT EXISTS run_events_run_id_idx ON run_events(run_id);
 
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS github_trigger_comment_id BIGINT;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS source_key TEXT;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS backend TEXT;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS agent TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS runs_source_key_idx ON runs(source_key);
 
 CREATE TABLE IF NOT EXISTS github_poll_state (

@@ -119,9 +119,9 @@ const EVAL_CASES: EvalCase[] = [
     title: "Issue mention bootstrap status",
     trigger: "mention",
     completionMode: "started",
-    task: "Acknowledge this issue and start working. Post a Codex run status update. Do not modify files.",
+    task: "Acknowledge this issue and start working. Post a run status update. Do not modify files.",
     rubric: [
-      "Pass if the JSON evidence shows the mention trigger started a Codex run status comment.",
+      "Pass if the JSON evidence shows the mention trigger started a backend run status comment.",
       "Fail if timed_out is true or bot_started is false.",
       "This case validates mention bootstrap behavior, not final task output quality.",
     ].join("\n"),
@@ -134,12 +134,14 @@ const EVAL_CASES: EvalCase[] = [
     task: "You are assigned directly. Start working this issue and post run status.",
     rubric: [
       "Pass if assignment_attempted is true and bot_started is true.",
-      "Pass if trigger_mode is direct-assignment and first_bot_comment indicates Codex run started.",
+      "Pass if trigger_mode is direct-assignment and first_bot_comment indicates a backend run started.",
       "Fail if bot_started is false, timed_out is true, or assignment_attempted is false.",
       "This case validates bootstrap start behavior, not full task completion.",
     ].join("\n"),
   },
 ];
+
+const RUN_COMMENT_RE = /\b(?:codex|opencode)\s+run\b/i;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -481,11 +483,15 @@ function shouldCollectCodexEvidence(assignmentHandle: string): boolean {
 
 function isTerminalBotComment(body: string): boolean {
   const firstLine = body.split("\n")[0]?.trim().toLowerCase() ?? "";
-  if (/^codex run\s+\S+\s+complete$/.test(firstLine)) return true;
+  if (/^(?:codex|opencode) run\s+\S+\s+complete$/.test(firstLine)) return true;
   const statusMatch = body.match(/^\s*status:\s*([a-z-]+)/im);
   if (!statusMatch) return false;
   const status = statusMatch[1].toLowerCase();
   return status === "completed" || status === "failed" || status === "succeeded";
+}
+
+function isAgentRunComment(body: string): boolean {
+  return RUN_COMMENT_RE.test(body);
 }
 
 async function waitForBot(input: {
@@ -504,7 +510,7 @@ async function waitForBot(input: {
     const all = JSON.parse(raw) as BotComment[];
     const botComments = all.filter((comment) => botSet.has((comment.user?.login ?? "").toLowerCase()));
 
-    const started = botComments.length > 0;
+    const started = botComments.some((comment) => isAgentRunComment(comment.body ?? ""));
     const completed = botComments.some((comment) => isTerminalBotComment(comment.body ?? ""));
 
     if ((input.mode === "started" && started) || (input.mode === "terminal" && completed)) {
@@ -523,7 +529,7 @@ async function waitForBot(input: {
   const raw = gh(["api", `repos/${input.repo}/issues/${input.issueNumber}/comments?per_page=100`]);
   const all = JSON.parse(raw) as BotComment[];
   const botComments = all.filter((comment) => botSet.has((comment.user?.login ?? "").toLowerCase()));
-  const started = botComments.length > 0;
+  const started = botComments.some((comment) => isAgentRunComment(comment.body ?? ""));
   const completed = botComments.some((comment) => isTerminalBotComment(comment.body ?? ""));
   const doneAtDeadline = input.mode === "started" ? started : completed;
   return {

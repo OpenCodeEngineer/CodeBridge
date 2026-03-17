@@ -9,7 +9,7 @@ import {
   resolveDefaultGithubCommandPrefixes,
   resolveGithubAppIdentity
 } from "./command-prefixes.js"
-import { routeDiscussionCommentCommand, routeIssueCommentCommand } from "./github-routing.js"
+import { routeDiscussionCommentCommand, routeExplicitGitHubCommand, routeIssueCommentCommand } from "./github-routing.js"
 import { postControlAck, postDiscussionUnsupportedControl, postIssueStatus } from "./github-controls.js"
 import { ensureRepoPath } from "./repo.js"
 import { logger } from "./logger.js"
@@ -133,6 +133,21 @@ export function startGitHubPolling(params: {
       defaultPrefixesPromise,
       appIdentityPromise,
       githubPollBackfill: env.githubPollBackfill
+    })
+
+    await pollPullRequestReviewComments({
+      config,
+      tenant,
+      repo,
+      owner,
+      repoName,
+      client,
+      store,
+      runService,
+      defaultPrefixesPromise,
+      appIdentityPromise,
+      githubPollBackfill: env.githubPollBackfill,
+      env
     })
 
     const state = await store.getGithubPollState(tenant.id, repoFullName)
@@ -341,6 +356,8 @@ To specify a tenant, use: \`@tenant-id your command here\``
           repoPath,
           sourceKey,
           prompt,
+          backend: repo.backend,
+          agent: repo.agent,
           model: repo.model,
           branchPrefix: repo.branchPrefix,
           github: {
@@ -467,6 +484,8 @@ async function pollAssignedIssues(input: {
       repoPath,
       sourceKey,
       prompt: buildIssueBootstrapPrompt(issue.number, issue.title, issue.body ?? undefined),
+      backend: input.repo.backend,
+      agent: input.repo.agent,
       model: input.repo.model,
       branchPrefix: input.repo.branchPrefix,
       github: {
@@ -657,6 +676,8 @@ async function pollDiscussionComments(input: {
         repoPath,
         sourceKey,
         prompt,
+        backend: input.repo.backend,
+        agent: input.repo.agent,
         model: input.repo.model,
         branchPrefix: input.repo.branchPrefix,
         github: {
@@ -683,6 +704,290 @@ async function pollDiscussionComments(input: {
     tenantId: input.tenant.id,
     repoFullName: discussionPollKey,
     lastCommentId: null,
+    lastCommentCreatedAt: newestCreatedAt ?? (state?.lastCommentCreatedAt ?? null)
+  })
+}
+
+async function pollPullRequestReviewComments(input: {
+  config: AppConfig
+  tenant: TenantConfig
+  repo: RepoConfig
+  owner: string
+  repoName: string
+  client: GitHubClient
+  store: RunStore
+  runService: RunService
+  defaultPrefixesPromise: Promise<string[]>
+  appIdentityPromise: Promise<{ slug?: string; botLogin?: string } | null>
+  githubPollBackfill: boolean
+  env: GitHubPollEnv
+}): Promise<void> {
+  const reviewPollKey = `${input.repo.fullName}#pr-review`
+  const state = await input.store.getGithubPollState(input.tenant.id, reviewPollKey)
+  const appIdentity = await resolveAppIdentityWithTimeout(input.appIdentityPromise)
+
+  type ReviewComment = {
+    id: number
+    body?: string | null
+    created_at?: string | null
+    pull_request_url?: string | null
+    user?: {
+      login?: string | null
+      type?: string | null
+    } | null
+  }
+
+  let response: { data: ReviewComment[] }
+  try {
+    response = await input.client.octokit.request("GET /repos/{owner}/{repo}/pulls/comments", {
+      owner: input.owner,
+      repo: input.repoName,
+      per_page: 100,
+      sort: "created",
+      direction: "desc"
+    }) as { data: ReviewComment[] }
+  } catch (error) {
+    logger.warn({
+      err: error,
+      tenantId: input.tenant.id,
+      repoFullName: input.repo.fullName
+    }, "GitHub PR review comment polling failed")
+    return
+  }
+
+  const comments = response.data
+  const newest = comments[0]
+  const newestId = newest?.id ?? null
+  const newestCreatedAt = newest?.created_at ?? null
+
+  if (!state && !input.githubPollBackfill) {
+    await input.store.updateGithubPollState({
+      tenantId: input.tenant.id,
+      repoFullName: reviewPollKey,
+      lastCommentId: newestId,
+      lastCommentCreatedAt: newestCreatedAt
+    })
+    return
+  }
+
+  const lastId = state?.lastCommentId ?? 0
+  const pending = comments
+    .filter(comment => typeof comment.id === "number" && comment.id > lastId)
+    .sort((a, b) => a.id - b.id)
+  const defaultPrefixes = pending.length > 0
+    ? await resolveDefaultPrefixesWithTimeout(input.defaultPrefixesPromise)
+    : []
+  const issueMetaByNumber = new Map<number, { title: string; body?: string; managed: boolean }>()
+  const issueSessionByNumber = new Map<number, string | null>()
+  let resolvedRepoPath: string | null = null
+
+  const getRepoPath = async () => {
+    if (!resolvedRepoPath) {
+      resolvedRepoPath = await ensureRepoPath(input.repo)
+    }
+    return resolvedRepoPath
+  }
+
+  const getIssueMeta = async (issueNumber: number) => {
+    const cached = issueMetaByNumber.get(issueNumber)
+    if (cached) return cached
+
+    const issue = await input.client.octokit.issues.get({
+      owner: input.owner,
+      repo: input.repoName,
+      issue_number: issueNumber
+    })
+    const meta = {
+      title: issue.data.title,
+      body: issue.data.body ?? undefined,
+      managed: hasManagedLabel(issue.data.labels)
+    }
+    issueMetaByNumber.set(issueNumber, meta)
+    return meta
+  }
+
+  const getIssueSessionId = async (issueNumber: number, issueBody?: string) => {
+    const cached = issueSessionByNumber.get(issueNumber)
+    if (cached !== undefined) return cached
+
+    const resolved = await resolveSessionIdFromIssue({
+      issueBody,
+      fetchComments: async () => {
+        const comments = await input.client.octokit.issues.listComments({
+          owner: input.owner,
+          repo: input.repoName,
+          issue_number: issueNumber,
+          per_page: 100
+        })
+        return comments.data
+      }
+    })
+    issueSessionByNumber.set(issueNumber, resolved)
+    return resolved
+  }
+
+  for (const comment of pending) {
+    try {
+      const body = comment.body?.trim()
+      if (!body) continue
+
+      const authorLogin = comment.user?.login ?? undefined
+      const authorLower = authorLogin?.toLowerCase()
+      if (
+        comment.user?.type === "Bot" ||
+        authorLower?.endsWith("[bot]") ||
+        (appIdentity?.slug && authorLower === appIdentity.slug.toLowerCase()) ||
+        (appIdentity?.botLogin && authorLower === appIdentity.botLogin.toLowerCase())
+      ) {
+        continue
+      }
+
+      const issueNumber = parsePullRequestNumber(comment.pull_request_url)
+      if (!issueNumber) continue
+
+      const issueMeta = await getIssueMeta(issueNumber)
+      const assigneePrefixes = buildAssigneeMentionPrefixes(input.tenant.github?.assignmentAssignees)
+      const prefixes = mergeGithubCommandPrefixes(
+        assigneePrefixes,
+        defaultPrefixes
+      )
+      const command = routeExplicitGitHubCommand({
+        body,
+        prefixes
+      })
+      if (!command) continue
+
+      if (command.tenantHint) {
+        const hintLower = command.tenantHint.toLowerCase()
+        const tenantMatches = hintLower === input.tenant.id.toLowerCase()
+
+        if (!tenantMatches) {
+          const allGithubTenants = input.config.tenants.filter(tenant => tenant.github)
+          const validTenantIds = allGithubTenants.map(tenant => tenant.id)
+          const isValidHint = allGithubTenants.some(tenant => tenant.id.toLowerCase() === hintLower)
+
+          if (!isValidHint) {
+            const tenantList = validTenantIds.length > 0
+              ? validTenantIds.map(id => `- \`@${id}\``).join("\n")
+              : "_(No GitHub-enabled tenants configured)_"
+
+            await input.client.octokit.issues.createComment({
+              owner: input.owner,
+              repo: input.repoName,
+              issue_number: issueNumber,
+              body: `❌ **Tenant Resolution Failed**
+
+Tenant \`${command.tenantHint}\` not found or not configured for GitHub.
+
+**Valid tenant IDs for this repository:**
+${tenantList}
+
+To specify a tenant, use: \`@tenant-id your command here\``
+            })
+          }
+          continue
+        }
+      }
+
+      if (command.type === "status") {
+        await postIssueStatus({
+          tenantId: input.tenant.id,
+          repoFullName: input.repo.fullName,
+          issueNumber,
+          owner: input.owner,
+          repo: input.repoName,
+          client: input.client,
+          store: input.store
+        })
+        continue
+      }
+
+      if (command.type === "pause" || command.type === "resume") {
+        await postControlAck({
+          commandType: command.type,
+          issueNumber,
+          owner: input.owner,
+          repo: input.repoName,
+          client: input.client
+        })
+        continue
+      }
+
+      if (issueMeta.managed && command.type === "reply") {
+        const sessionId = await getIssueSessionId(issueNumber, issueMeta.body)
+        if (sessionId) {
+          const relay = dispatchSessionRelay({
+            sessionId,
+            owner: input.owner,
+            repo: input.repoName,
+            issueNumber,
+            commentId: comment.id,
+            commentBody: body,
+            authorLogin,
+            repoPath: await getRepoPath(),
+            codexPath: input.env.codexPath,
+            codexTurnTimeoutMs: input.env.codexTurnTimeoutMs,
+            postIssueComment: async (commentBody) => {
+              await input.client.octokit.issues.createComment({
+                owner: input.owner,
+                repo: input.repoName,
+                issue_number: issueNumber,
+                body: commentBody
+              })
+            }
+          })
+          if (relay.accepted) continue
+        }
+      }
+
+      const sourceKey = buildPullRequestReviewSourceKey({
+        installationId: input.tenant.github?.installationId,
+        repoFullName: input.repo.fullName,
+        issueNumber,
+        commentId: comment.id,
+        commandType: command.type
+      })
+      const existing = await input.store.getRunBySourceKey(sourceKey)
+      if (existing) continue
+
+      const prompt = command.type === "reply"
+        ? buildReplyPrompt(issueNumber, command.prompt)
+        : command.prompt
+
+      await input.runService.createRun({
+        tenantId: input.tenant.id,
+        repoFullName: input.repo.fullName,
+        repoPath: await getRepoPath(),
+        sourceKey,
+        prompt,
+        backend: input.repo.backend,
+        agent: input.repo.agent,
+        model: input.repo.model,
+        branchPrefix: input.repo.branchPrefix,
+        github: {
+          owner: input.owner,
+          repo: input.repoName,
+          issueNumber,
+          installationId: input.tenant.github?.installationId,
+          issueTitle: issueMeta.title,
+          issueBody: issueMeta.body,
+          triggerCommentId: comment.id
+        }
+      })
+    } catch (error) {
+      logger.error({
+        err: error,
+        tenantId: input.tenant.id,
+        repoFullName: input.repo.fullName,
+        commentId: comment.id
+      }, "GitHub PR review comment polling failed")
+    }
+  }
+
+  await input.store.updateGithubPollState({
+    tenantId: input.tenant.id,
+    repoFullName: reviewPollKey,
+    lastCommentId: newestId ?? (state?.lastCommentId ?? null),
     lastCommentCreatedAt: newestCreatedAt ?? (state?.lastCommentCreatedAt ?? null)
   })
 }
@@ -768,6 +1073,13 @@ function parseIssueNumber(issueUrl?: string | null): number | null {
   return parseInt(match[1], 10)
 }
 
+function parsePullRequestNumber(pullRequestUrl?: string | null): number | null {
+  if (!pullRequestUrl) return null
+  const match = pullRequestUrl.match(/\/pulls\/(\d+)/)
+  if (!match) return null
+  return parseInt(match[1], 10)
+}
+
 function buildReplyPrompt(issueNumber: number, prompt: string): string {
   return [
     `Follow-up command from GitHub issue #${issueNumber}:`,
@@ -801,6 +1113,23 @@ function buildSourceKey(input: {
 }): string {
   return [
     "github",
+    input.installationId ?? "none",
+    input.repoFullName.toLowerCase(),
+    input.issueNumber,
+    input.commentId,
+    input.commandType
+  ].join(":")
+}
+
+function buildPullRequestReviewSourceKey(input: {
+  installationId?: number
+  repoFullName: string
+  issueNumber: number
+  commentId: number
+  commandType: CommandType
+}): string {
+  return [
+    "github-review",
     input.installationId ?? "none",
     input.repoFullName.toLowerCase(),
     input.issueNumber,

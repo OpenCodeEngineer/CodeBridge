@@ -1,13 +1,19 @@
 import { execa } from "execa"
 
+const TRANSIENT_UNTRACKED_PATHS = [
+  ".reflection/",
+  ".tts/",
+  ".tts-debug.log"
+]
+
 export async function git(args: string[], cwd: string): Promise<string> {
   const result = await execa("git", args, { cwd })
   return result.stdout.trim()
 }
 
 export async function isDirty(cwd: string): Promise<boolean> {
-  const status = await git(["status", "--porcelain"], cwd)
-  return status.length > 0
+  const entries = await getStatusEntries(cwd)
+  return entries.some(entry => !shouldIgnoreStatusEntry(entry))
 }
 
 export async function currentBranch(cwd: string): Promise<string> {
@@ -28,7 +34,11 @@ export async function createBranch(cwd: string, branch: string, base: string): P
 }
 
 export async function commitAll(cwd: string, message: string): Promise<void> {
+  const ignoredPaths = await getIgnoredTransientUntrackedPaths(cwd)
   await git(["add", "-A"], cwd)
+  if (ignoredPaths.length > 0) {
+    await git(["reset", "--", ...ignoredPaths], cwd)
+  }
   await git(["commit", "-m", message], cwd)
 }
 
@@ -44,4 +54,33 @@ export async function getDefaultBranchFromOrigin(cwd: string): Promise<string | 
   } catch {
     return null
   }
+}
+
+async function getIgnoredTransientUntrackedPaths(cwd: string): Promise<string[]> {
+  const entries = await getStatusEntries(cwd)
+  return entries
+    .filter(shouldIgnoreStatusEntry)
+    .map(entry => entry.path)
+}
+
+async function getStatusEntries(cwd: string): Promise<Array<{ code: string; path: string }>> {
+  const status = await git(["status", "--porcelain", "--untracked-files=all"], cwd)
+  return status
+    .split(/\r?\n/)
+    .map(line => line.trimEnd())
+    .filter(Boolean)
+    .map(line => ({
+      code: line.slice(0, 2),
+      path: line.slice(3)
+    }))
+}
+
+function shouldIgnoreStatusEntry(entry: { code: string; path: string }): boolean {
+  if (entry.code !== "??") return false
+  return TRANSIENT_UNTRACKED_PATHS.some(pattern => {
+    if (pattern.endsWith("/")) {
+      return entry.path.startsWith(pattern)
+    }
+    return entry.path === pattern
+  })
 }

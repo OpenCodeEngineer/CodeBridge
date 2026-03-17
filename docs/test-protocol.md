@@ -5,7 +5,8 @@ This protocol validates the exact interaction surfaces required for CodeBridge:
 1. issue assigned to `@githubapphandle`
 2. `@githubapphandle` mention in GitHub issue comments
 3. `@githubapphandle` mention in GitHub PR conversation comments
-4. `@githubapphandle` mention in GitHub discussion comments
+4. `@githubapphandle` mention in GitHub PR review comments
+5. `@githubapphandle` mention in GitHub discussion comments
 
 ## Preconditions
 
@@ -20,6 +21,8 @@ This protocol validates the exact interaction surfaces required for CodeBridge:
 - For discussions:
   - repository has discussions enabled;
   - GitHub App has Discussions permission (read/write).
+- For PR review comment coverage:
+  - there must be at least one open PR with a reviewable added line so the runner can post a line comment.
 
 ## Runner
 
@@ -89,22 +92,25 @@ bun scripts/runGithubMentionE2ETest.ts \
   --issue-repo dzianisv/codebridge-test \
   --discussion-repo VibeTechnologies/vibeteam-eval-hello-world \
   --discussion-number 108 \
-  --timeout 180 \
+  --assignment-handle @openai-code-agent \
+  --timeout 240 \
   --poll 5 \
   --hook-target http://127.0.0.1:8788/github/webhook \
   --webhook-secret codebridge-eval-secret \
-  --database-url sqlite:///private/tmp/codebridge-eval-1773764000/codebridge-protocol.db
+  --database-url sqlite:///var/folders/gq/0rs975rd2b9bj2h6zkymwx6r0000gn/T/codebridge-e2e-wvi_bl7g/codebridge-e2e.db
 ```
 
 Result matrix:
 
 - `assignment-to-app-handle`: `pass`
   - mode: native assignment actor (`openai-code-agent`)
-  - evidence: [issue #481](https://github.com/dzianisv/codebridge-test/issues/481)
+  - evidence: [issue #507](https://github.com/dzianisv/codebridge-test/issues/507)
 - `issue-mention`: `pass`
-  - evidence: [issue #483](https://github.com/dzianisv/codebridge-test/issues/483)
+  - evidence: [issue #509](https://github.com/dzianisv/codebridge-test/issues/509)
 - `pr-mention`: `pass`
-  - evidence: [PR #482](https://github.com/dzianisv/codebridge-test/pull/482)
+  - evidence: [PR #508](https://github.com/dzianisv/codebridge-test/pull/508)
+- `pr-review-mention`: `pass`
+  - evidence: [PR #503](https://github.com/dzianisv/codebridge-test/pull/503)
 - `discussion-mention`: `pass`
   - mode: synthetic `discussion_comment` webhook fallback
-  - evidence: report `reports/codebridge-test-report-2026-03-17T08-20-02-306Z.json`
+  - evidence: report `reports/codebridge-test-report-2026-03-17T16-12-48-856Z.json`

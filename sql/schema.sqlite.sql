@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS runs (
   source_key TEXT UNIQUE,
   status TEXT NOT NULL,
   prompt TEXT NOT NULL,
+  backend TEXT,
+  agent TEXT,
   model TEXT,
   branch_prefix TEXT,
   slack_channel TEXT,

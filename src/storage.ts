@@ -3,7 +3,8 @@ import { mkdirSync, readFileSync } from "node:fs"
 import path from "node:path"
 import { Pool } from "pg"
 import Database from "better-sqlite3"
-import type { RunEvent, RunRecord, RunStatus, SlackContext, GitHubContext } from "./types.js"
+import type { AgentBackend, RunEvent, RunRecord, RunStatus, SlackContext, GitHubContext } from "./types.js"
+import { resolveAgentBackend } from "./agent-backend.js"
 
 export type RunStore = {
   ensureSchema: () => Promise<void>
@@ -14,6 +15,8 @@ export type RunStore = {
     repoPath: string
     sourceKey?: string
     prompt: string
+    backend?: AgentBackend
+    agent?: string
     model?: string
     branchPrefix?: string
     slack?: SlackContext
@@ -60,6 +63,8 @@ export function createPostgresStore(databaseUrl: string): RunStore {
     repoPath: string
     sourceKey?: string
     prompt: string
+    backend?: AgentBackend
+    agent?: string
     model?: string
     branchPrefix?: string
     slack?: SlackContext
@@ -67,11 +72,11 @@ export function createPostgresStore(databaseUrl: string): RunStore {
   }) => {
     const result = await pool.query(
       `INSERT INTO runs (
-        id, tenant_id, repo_full_name, repo_path, source_key, status, prompt, model, branch_prefix,
+        id, tenant_id, repo_full_name, repo_path, source_key, status, prompt, backend, agent, model, branch_prefix,
         slack_channel, slack_thread_ts, slack_message_ts, slack_user_id,
         github_owner, github_repo, github_issue_number, github_comment_id, github_trigger_comment_id,
         github_installation_id, github_issue_title, github_issue_body
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
       ON CONFLICT (source_key) DO UPDATE SET updated_at = now()
       RETURNING *`,
       [
@@ -82,6 +87,8 @@ export function createPostgresStore(databaseUrl: string): RunStore {
         input.sourceKey ?? null,
         "queued",
         input.prompt,
+        resolveAgentBackend(input.backend),
+        input.agent ?? null,
         input.model ?? null,
         input.branchPrefix ?? null,
         input.slack?.channel ?? null,
@@ -214,6 +221,8 @@ function toRunRecord(row: any): RunRecord {
     sourceKey: row.source_key ?? undefined,
     status: row.status,
     prompt: row.prompt,
+    backend: resolveAgentBackend(row.backend ?? undefined),
+    agent: row.agent ?? undefined,
     model: row.model ?? undefined,
     branchPrefix: row.branch_prefix ?? undefined,
     slack: row.slack_channel && row.slack_thread_ts ? {
@@ -262,12 +271,12 @@ export function createSqliteStore(databaseUrl: string): RunStore {
 
   const insertRun = db.prepare(
     `INSERT INTO runs (
-      id, tenant_id, repo_full_name, repo_path, source_key, status, prompt, model, branch_prefix,
+      id, tenant_id, repo_full_name, repo_path, source_key, status, prompt, backend, agent, model, branch_prefix,
       slack_channel, slack_thread_ts, slack_message_ts, slack_user_id,
       github_owner, github_repo, github_issue_number, github_comment_id, github_trigger_comment_id,
       github_installation_id, github_issue_title, github_issue_body
     ) VALUES (
-      @id, @tenantId, @repoFullName, @repoPath, @sourceKey, @status, @prompt, @model, @branchPrefix,
+      @id, @tenantId, @repoFullName, @repoPath, @sourceKey, @status, @prompt, @backend, @agent, @model, @branchPrefix,
       @slackChannel, @slackThreadTs, @slackMessageTs, @slackUserId,
       @githubOwner, @githubRepo, @githubIssueNumber, @githubCommentId, @githubTriggerCommentId,
       @githubInstallationId, @githubIssueTitle, @githubIssueBody
@@ -310,6 +319,8 @@ export function createSqliteStore(databaseUrl: string): RunStore {
     repoPath: string
     sourceKey?: string
     prompt: string
+    backend?: AgentBackend
+    agent?: string
     model?: string
     branchPrefix?: string
     slack?: SlackContext
@@ -323,6 +334,8 @@ export function createSqliteStore(databaseUrl: string): RunStore {
       sourceKey: input.sourceKey ?? null,
       status: "queued",
       prompt: input.prompt,
+      backend: resolveAgentBackend(input.backend),
+      agent: input.agent ?? null,
       model: input.model ?? null,
       branchPrefix: input.branchPrefix ?? null,
       slackChannel: input.slack?.channel ?? null,
@@ -465,6 +478,8 @@ function toRunRecordSqlite(row: any): RunRecord {
     sourceKey: row.source_key ?? undefined,
     status: row.status,
     prompt: row.prompt,
+    backend: resolveAgentBackend(row.backend ?? undefined),
+    agent: row.agent ?? undefined,
     model: row.model ?? undefined,
     branchPrefix: row.branch_prefix ?? undefined,
     slack: row.slack_channel && row.slack_thread_ts ? {
@@ -495,6 +510,12 @@ function ensureSqliteRunSchemaMigrations(db: Database.Database) {
   const columns = db.prepare("PRAGMA table_info(runs)").all() as Array<{ name: string }>
   if (!columns.some(column => column.name === "source_key")) {
     db.exec("ALTER TABLE runs ADD COLUMN source_key TEXT")
+  }
+  if (!columns.some(column => column.name === "backend")) {
+    db.exec("ALTER TABLE runs ADD COLUMN backend TEXT")
+  }
+  if (!columns.some(column => column.name === "agent")) {
+    db.exec("ALTER TABLE runs ADD COLUMN agent TEXT")
   }
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS runs_source_key_idx ON runs(source_key)")
 }

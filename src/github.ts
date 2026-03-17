@@ -13,7 +13,12 @@ import {
   resolveGithubAppIdentity
 } from "./command-prefixes.js"
 import { dispatchSessionRelay, resolveSessionIdFromIssue } from "./codex-session-relay.js"
-import { routeDiscussionCommentCommand, routeIssueCommentCommand, shouldRelayManagedIssueCommand } from "./github-routing.js"
+import {
+  routeDiscussionCommentCommand,
+  routeExplicitGitHubCommand,
+  routeIssueCommentCommand,
+  shouldRelayManagedIssueCommand
+} from "./github-routing.js"
 import { postControlAck, postDiscussionUnsupportedControl, postIssueStatus } from "./github-controls.js"
 
 export type GitHubCommandHandler = (input: {
@@ -170,6 +175,152 @@ export function createGitHubApp(
         installationId,
         issueTitle: issue.title,
         issueBody: issue.body ?? undefined
+      }
+
+      await onCommand({
+        tenantId: tenant.id,
+        commandType: command.type,
+        prompt: command.prompt,
+        repoFullName: repo.fullName,
+        sourceKey,
+        github
+      })
+    })
+
+    app.on("pull_request_review_comment.created", async context => {
+      const installationId = context.payload.installation?.id
+      const repoFullName = context.payload.repository.full_name
+      const defaultTenant = findTenantByGithubInstallation(config, installationId) ?? findTenantByRepoFullName(config, repoFullName)
+      if (!defaultTenant?.github) return
+      const authorLogin = context.payload.comment.user?.login
+      if (context.payload.comment.user?.type === "Bot" || authorLogin?.toLowerCase().endsWith("[bot]")) return
+
+      if (defaultTenant.github.repoAllowlist && !defaultTenant.github.repoAllowlist.includes(repoFullName)) return
+
+      const defaultPrefixes = await defaultPrefixesPromise
+      const assigneePrefixes = buildAssigneeMentionPrefixes(defaultTenant.github.assignmentAssignees)
+      const prefixes = mergeGithubCommandPrefixes(
+        assigneePrefixes,
+        defaultPrefixes
+      )
+      const body = context.payload.comment.body ?? ""
+      const command = routeExplicitGitHubCommand({
+        body,
+        prefixes
+      })
+      if (!command) return
+
+      const owner = context.payload.repository.owner.login
+      const repoName = context.payload.repository.name
+      const issueNumber = context.payload.pull_request.number
+
+      const tenantResult = resolveTargetTenant({
+        config,
+        defaultTenant,
+        tenantHint: command.tenantHint,
+        installationId,
+        repoFullName
+      })
+      if (!tenantResult.success) {
+        await context.octokit.issues.createComment({
+          owner,
+          repo: repoName,
+          issue_number: issueNumber,
+          body: buildTenantErrorComment(tenantResult.error, tenantResult.validTenantIds)
+        })
+        return
+      }
+
+      const tenant = tenantResult.tenant
+      const repo = resolveRepo(tenant, repoFullName)
+      if (!repo) return
+
+      const issue = await context.octokit.issues.get({
+        owner,
+        repo: repoName,
+        issue_number: issueNumber
+      })
+      const issueManaged = hasManagedLabel(issue.data.labels)
+
+      if (command.type === "status") {
+        await postIssueStatus({
+          tenantId: tenant.id,
+          repoFullName: repo.fullName,
+          issueNumber,
+          owner,
+          repo: repoName,
+          client: context.octokit as any,
+          store
+        })
+        return
+      }
+
+      if (command.type === "pause" || command.type === "resume") {
+        await postControlAck({
+          commandType: command.type,
+          issueNumber,
+          owner,
+          repo: repoName,
+          client: context.octokit as any
+        })
+        return
+      }
+
+      if (issueManaged && command.type === "reply") {
+        const sessionId = await resolveSessionIdFromIssue({
+          issueBody: issue.data.body ?? undefined,
+          fetchComments: async () => {
+            const comments = await context.octokit.issues.listComments({
+              owner,
+              repo: repoName,
+              issue_number: issueNumber,
+              per_page: 100
+            })
+            return comments.data
+          }
+        })
+
+        if (sessionId) {
+          const relay = dispatchSessionRelay({
+            sessionId,
+            owner,
+            repo: repoName,
+            issueNumber,
+            commentId: context.payload.comment.id,
+            commentBody: context.payload.comment.body ?? "",
+            authorLogin,
+            repoPath: repo.path,
+            codexPath: env.codexPath,
+            codexTurnTimeoutMs: env.codexTurnTimeoutMs,
+            postIssueComment: async (commentBody) => {
+              await context.octokit.issues.createComment({
+                owner,
+                repo: repoName,
+                issue_number: issueNumber,
+                body: commentBody
+              })
+            }
+          })
+          if (relay.accepted) return
+        }
+      }
+
+      const sourceKey = [
+        "github-review",
+        installationId ?? "none",
+        repoFullName.toLowerCase(),
+        issueNumber,
+        context.payload.comment.id,
+        command.type
+      ].join(":")
+      const github: GitHubContext = {
+        owner,
+        repo: repoName,
+        issueNumber,
+        triggerCommentId: context.payload.comment.id,
+        installationId,
+        issueTitle: issue.data.title,
+        issueBody: issue.data.body ?? undefined
       }
 
       await onCommand({

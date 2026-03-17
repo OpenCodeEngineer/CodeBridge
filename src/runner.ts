@@ -4,6 +4,9 @@ import type { WebClient } from "@slack/web-api"
 import { execa } from "execa"
 import type { RunStore } from "./storage.js"
 import type { RunRecord } from "./types.js"
+import { getRunBackend, getRunBackendLabel } from "./agent-backend.js"
+import type { OpenCodeActivity, OpenCodePart } from "./opencode.js"
+import { runOpenCodePrompt } from "./opencode.js"
 import { ProgressTracker } from "./progress.js"
 import { Throttler } from "./throttle.js"
 import { formatGitHubStatus, formatSlackStatus, formatFinalSummary } from "./status.js"
@@ -21,6 +24,12 @@ export type RunnerEnv = {
   codexPath?: string
   codexApiKey?: string
   codexTurnTimeoutMs: number
+  opencodeBaseUrl?: string
+  opencodeUsername?: string
+  opencodePassword?: string
+  opencodeEnabled?: boolean
+  opencodeTimeoutMs?: number
+  opencodePollIntervalMs?: number
   githubAppId?: number
   githubPrivateKey?: string
 }
@@ -37,13 +46,19 @@ export function createRunner(params: {
     const run = await store.getRun(job.runId)
     if (!run) throw new Error(`Run not found: ${job.runId}`)
     const discussionTarget = isDiscussionSourceKey(run.sourceKey)
+    const backend = getRunBackend(run)
+    const runTurnTimeoutMs = Math.max(
+      30_000,
+      backend === "opencode"
+        ? env.opencodeTimeoutMs ?? env.codexTurnTimeoutMs
+        : env.codexTurnTimeoutMs
+    )
 
     await store.updateRunStatus(run.id, "running")
     void vibeAgents?.sendRunStatus(run, "running")
 
     const tracker = new ProgressTracker()
     const throttler = new Throttler(2000)
-    const codexTurnTimeoutMs = Math.max(30_000, env.codexTurnTimeoutMs)
 
     const githubClient = await getGitHubClient(run, env)
     if (run.github && githubClient && !discussionTarget) {
@@ -75,24 +90,16 @@ export function createRunner(params: {
       }
     }
 
-    const handleEvent = async (event: ThreadEvent, seq: number) => {
+    let seq = 0
+    const appendRunEvent = async (type: string, payload: Record<string, unknown>) => {
+      seq += 1
       await store.appendEvent({
         runId: run.id,
         seq,
-        type: event.type,
-        payload: event as unknown as Record<string, unknown>,
+        type,
+        payload,
         createdAt: new Date().toISOString()
       })
-
-      if (event.type === "item.completed") {
-        handleCompletedItem(tracker, event.item)
-      } else if (event.type === "item.updated") {
-        handleUpdatedItem(tracker, event.item)
-      } else if (event.type === "turn.failed") {
-        tracker.pushLine(`Turn failed: ${event.error.message}`)
-      } else if (event.type === "turn.completed") {
-        tracker.pushLine(`Turn completed. Output tokens ${event.usage.output_tokens}`)
-      }
 
       if (throttler.shouldRun()) {
         await updateStatus("running")
@@ -108,52 +115,13 @@ export function createRunner(params: {
       await updateStatus("running")
 
       const prompt = buildPrompt(run)
-      const mcpOverrides = await resolveDisabledMcpServersConfig(env.codexPath)
-      const codex = new Codex({
-        codexPathOverride: env.codexPath,
-        apiKey: env.codexApiKey,
-        // Bridge owns GitHub writes via installation tokens.
-        // Disable MCP sources so issue updates are app-authored only.
-        config: {
-          features: {
-            apps: false,
-            apps_mcp_gateway: false,
-            connectors: false
-          },
-          mcp_servers: mcpOverrides
-        }
+      const finalResponse = await executeRunTurn({
+        run,
+        prompt,
+        tracker,
+        appendRunEvent,
+        env
       })
-      const thread = codex.startThread({
-        workingDirectory: run.repoPath,
-        model: run.model,
-        // The bridge must be able to create/edit files and push branches.
-        sandboxMode: "workspace-write",
-        // Auto-approve all commands; the bridge is fully autonomous.
-        approvalPolicy: "never",
-      })
-      const turnAbortController = new AbortController()
-      const turnTimeout = setTimeout(() => {
-        turnAbortController.abort(`Codex turn timed out after ${Math.round(codexTurnTimeoutMs / 1000)}s`)
-      }, codexTurnTimeoutMs)
-
-      let seq = 0
-      let finalResponse = ""
-      try {
-        // Codex SDK TurnOptions supports AbortSignal via `signal`.
-        const { events } = await thread.runStreamed(prompt, {
-          signal: turnAbortController.signal
-        })
-        for await (const event of events) {
-          seq += 1
-          if (event.type === "item.completed" && event.item.type === "agent_message") {
-            finalResponse = event.item.text
-            tracker.setAgentMessage(event.item.text)
-          }
-          await handleEvent(event, seq)
-        }
-      } finally {
-        clearTimeout(turnTimeout)
-      }
 
       const hasChanges = await isDirty(run.repoPath)
       if (!hasChanges) {
@@ -211,7 +179,7 @@ export function createRunner(params: {
       await finalize(run, "succeeded", message, updateStatus, githubClient, slackClient)
     } catch (error) {
       const runError = error instanceof Error && error.name === "AbortError"
-        ? new Error(`Codex turn timed out after ${Math.round(codexTurnTimeoutMs / 1000)}s`)
+        ? new Error(`${getRunBackendLabel(run)} run timed out after ${Math.round(runTurnTimeoutMs / 1000)}s`)
         : error instanceof Error
           ? error
           : new Error(String(error))
@@ -226,6 +194,114 @@ export function createRunner(params: {
       await updateStatus("failed")
       throw runError
     }
+  }
+}
+
+async function executeRunTurn(params: {
+  run: RunRecord
+  prompt: string
+  tracker: ProgressTracker
+  appendRunEvent: (type: string, payload: Record<string, unknown>) => Promise<void>
+  env: RunnerEnv
+}) {
+  if (getRunBackend(params.run) === "opencode") {
+    return executeOpenCodeTurn(params)
+  }
+  return executeCodexTurn(params)
+}
+
+async function executeCodexTurn(params: {
+  run: RunRecord
+  prompt: string
+  tracker: ProgressTracker
+  appendRunEvent: (type: string, payload: Record<string, unknown>) => Promise<void>
+  env: RunnerEnv
+}) {
+  const codexTurnTimeoutMs = Math.max(30_000, params.env.codexTurnTimeoutMs)
+  const mcpOverrides = await resolveDisabledMcpServersConfig(params.env.codexPath)
+  const codex = new Codex({
+    codexPathOverride: params.env.codexPath,
+    apiKey: params.env.codexApiKey,
+    config: {
+      features: {
+        apps: false,
+        apps_mcp_gateway: false,
+        connectors: false
+      },
+      mcp_servers: mcpOverrides
+    }
+  })
+  const thread = codex.startThread({
+    workingDirectory: params.run.repoPath,
+    model: params.run.model,
+    sandboxMode: "workspace-write",
+    approvalPolicy: "never"
+  })
+
+  const turnAbortController = new AbortController()
+  const turnTimeout = setTimeout(() => {
+    turnAbortController.abort(`Codex turn timed out after ${Math.round(codexTurnTimeoutMs / 1000)}s`)
+  }, codexTurnTimeoutMs)
+
+  let finalResponse = ""
+  try {
+    const { events } = await thread.runStreamed(params.prompt, {
+      signal: turnAbortController.signal
+    })
+    for await (const event of events) {
+      if (event.type === "item.completed" && event.item.type === "agent_message") {
+        finalResponse = event.item.text
+      }
+      handleCodexEvent(params.tracker, event)
+      await params.appendRunEvent(event.type, event as unknown as Record<string, unknown>)
+    }
+  } finally {
+    clearTimeout(turnTimeout)
+  }
+
+  return finalResponse
+}
+
+async function executeOpenCodeTurn(params: {
+  run: RunRecord
+  prompt: string
+  tracker: ProgressTracker
+  appendRunEvent: (type: string, payload: Record<string, unknown>) => Promise<void>
+  env: RunnerEnv
+}) {
+  const result = await runOpenCodePrompt({
+    integration: {
+      baseUrl: params.env.opencodeBaseUrl ?? "",
+      username: params.env.opencodeUsername,
+      password: params.env.opencodePassword,
+      enabled: params.env.opencodeEnabled,
+      timeoutMs: params.env.opencodeTimeoutMs,
+      pollIntervalMs: params.env.opencodePollIntervalMs
+    },
+    directory: params.run.repoPath,
+    title: buildOpenCodeSessionTitle(params.run),
+    prompt: params.prompt,
+    agent: params.run.agent,
+    model: params.run.model,
+    onActivity: async (activity) => {
+      handleOpenCodeActivity(params.tracker, activity)
+      await params.appendRunEvent(`opencode.${activity.type}`, activity as unknown as Record<string, unknown>)
+    }
+  })
+
+  params.tracker.setAgentMessage(result.responseText)
+  return result.responseText
+}
+
+function handleCodexEvent(tracker: ProgressTracker, event: ThreadEvent) {
+  if (event.type === "item.completed") {
+    handleCompletedItem(tracker, event.item)
+  } else if (event.type === "item.updated") {
+    handleUpdatedItem(tracker, event.item)
+  } else if (event.type === "turn.failed") {
+    tracker.pushLine(`Turn failed: ${event.error.message}`)
+  } else if (event.type === "turn.completed") {
+    tracker.pushLine(`Turn completed. Output tokens ${event.usage.output_tokens}`)
   }
 }
 
@@ -250,6 +326,56 @@ function handleCompletedItem(tracker: ProgressTracker, item: ThreadItem) {
   }
 }
 
+function handleOpenCodeActivity(tracker: ProgressTracker, activity: OpenCodeActivity) {
+  if (activity.type === "health.checked") {
+    tracker.pushLine(`OpenCode server ${activity.version} healthy`)
+    return
+  }
+  if (activity.type === "session.created") {
+    tracker.pushLine(`OpenCode session ${activity.session.id} created`)
+    return
+  }
+  if (activity.type === "session.status") {
+    if (activity.status.type === "busy") {
+      tracker.pushLine("OpenCode session running")
+    } else if (activity.status.type === "idle") {
+      tracker.pushLine("OpenCode session idle")
+    } else {
+      tracker.pushLine(`OpenCode retry ${activity.status.attempt}: ${activity.status.message}`)
+    }
+    return
+  }
+  if (activity.type === "summary.requested") {
+    tracker.pushLine("OpenCode requested a final text summary")
+    return
+  }
+  if (activity.type === "summary.completed") {
+    tracker.setAgentMessage(activity.text)
+    return
+  }
+  handleOpenCodePart(tracker, activity.part)
+  if (activity.part.type === "text" && activity.message.role === "assistant") {
+    tracker.setAgentMessage(activity.part.text)
+  }
+}
+
+function handleOpenCodePart(tracker: ProgressTracker, part: OpenCodePart) {
+  if (part.type === "tool") {
+    const title = part.state.title ? ` ${part.state.title}` : ""
+    tracker.pushLine(`Tool ${part.tool} ${part.state.status}${title}`.trim())
+  } else if (part.type === "step-start") {
+    tracker.pushLine("Step started")
+  } else if (part.type === "step-finish") {
+    tracker.pushLine(`Step finished: ${part.reason}`)
+  } else if (part.type === "reasoning") {
+    tracker.pushLine("Reasoning updated")
+  } else if (part.type === "patch") {
+    tracker.pushLine(`Patch updated ${part.files.length} files`)
+  } else if (part.type === "retry") {
+    tracker.pushLine(`Retry ${part.attempt}: ${part.error.data?.message ?? "provider retry"}`)
+  }
+}
+
 function handleUpdatedItem(tracker: ProgressTracker, item: ThreadItem) {
   if (item.type === "todo_list") {
     const done = item.items.filter(i => i.completed).length
@@ -264,7 +390,8 @@ async function resolveBaseBranch(run: RunRecord): Promise<string> {
 }
 
 function buildBranchName(run: RunRecord, base: string): string {
-  const prefix = run.branchPrefix ?? (run.github?.issueNumber ? `codex/${run.github.issueNumber}` : "codex/task")
+  const backendPrefix = getRunBackend(run) === "opencode" ? "opencode" : "codex"
+  const prefix = run.branchPrefix ?? (run.github?.issueNumber ? `${backendPrefix}/${run.github.issueNumber}` : `${backendPrefix}/task`)
   const suffix = run.id.toLowerCase()
   return `${prefix}-${suffix}`
 }
@@ -283,8 +410,16 @@ function buildPrompt(run: RunRecord): string {
   return [issueTitle + issueBody, run.prompt].filter(Boolean).join("\n\n")
 }
 
+function buildOpenCodeSessionTitle(run: RunRecord): string {
+  if (run.github?.issueNumber) {
+    return `${run.repoFullName}#${run.github.issueNumber} ${run.id}`
+  }
+  return `${run.repoFullName} ${run.id}`
+}
+
 function buildCommitMessage(run: RunRecord): string {
-  const base = run.github?.issueNumber ? `codex: issue ${run.github.issueNumber}` : "codex: update"
+  const backend = getRunBackend(run)
+  const base = run.github?.issueNumber ? `${backend}: issue ${run.github.issueNumber}` : `${backend}: update`
   return base
 }
 
@@ -293,10 +428,11 @@ function buildRemoteUrl(run: RunRecord, token: string): string {
 }
 
 function buildPrTitle(run: RunRecord): string {
+  const backendLabel = getRunBackendLabel(run)
   if (run.github?.issueNumber && run.github.issueTitle) {
-    return `Codex: ${run.github.issueTitle}`
+    return `${backendLabel}: ${run.github.issueTitle}`
   }
-  return "Codex: changes"
+  return `${backendLabel}: changes`
 }
 
 function buildPrBody(run: RunRecord, summary: string, discussionTarget: boolean): string {

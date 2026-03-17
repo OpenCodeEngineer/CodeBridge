@@ -2,19 +2,20 @@
 
 ## Design Intent
 
-This design treats GitHub issue and PR conversation threads as the primary control plane for local Codex execution, with discussion threads supported as explicit command surfaces. App-authored feedback and durable session state are represented by labels/comments where the surface supports them.
+This design treats GitHub issue and PR conversation threads as the primary control plane for local agent execution, supports PR review comments as explicit command surfaces, and keeps discussion threads explicit as well. App-authored feedback and durable session state are represented by labels/comments where the surface supports them.
 
 ## Core Behavior
 
 1. Bootstrap via issue assignment to an assignment trigger handle (native assignable actor, or configured `assignmentAssignees`), or via bootstrap mention (`@CodexEngineer ...`) on:
    - issue comments
    - PR conversation comments
+   - PR review comments
    - discussion comments
    creates or resumes a run.
 2. Issue and PR conversation threads are marked managed (`agent:managed`).
 3. After that, plain human comments on the same managed issue or PR thread are interpreted as follow-up prompts.
-4. Discussion threads remain explicit-command surfaces; follow-up comments there still require mention/prefix.
-5. Bridge executes locally via Codex CLI and writes status/answers back to the originating GitHub thread.
+4. PR review comments and discussion threads remain explicit-command surfaces; follow-up comments there still require mention/prefix.
+5. Bridge executes the configured backend against the resolved local checkout and writes status/answers back to the originating GitHub thread.
 
 ## Routing Rules
 
@@ -26,6 +27,10 @@ This design treats GitHub issue and PR conversation threads as the primary contr
 - Issue or PR thread managed:
   - treat any non-bot comment as a follow-up prompt
   - still allow explicit control verbs (`status`, `pause`, `resume`)
+- PR review comment thread:
+  - require explicit app mention or configured prefix on every command
+  - accept `run`, `reply`, `status`, `pause`, and `resume`
+  - post acknowledgements and final responses on the PR conversation thread
 - Discussion thread:
   - require explicit app mention or configured prefix on every command
   - accept `run` and `reply`
@@ -58,13 +63,25 @@ Resolution flow:
 
 This means a mention on `owner/repo-a` will not be remapped to `owner/repo-b` through `defaultRepo`. `defaultRepo` is reserved for non-GitHub entrypoints that do not already carry a concrete GitHub repository identity.
 
+Backend dispatch happens only after this repo resolution completes. The selected backend receives the resolved `repos[].path`; it does not infer a repository or worktree from the mention text, process cwd, or agent state.
+
+## Agent Backend Selection
+
+- `repos[].backend` selects the execution backend for that repo and defaults to `codex` when omitted.
+- `repos[].agent` stores backend-specific agent metadata. It is currently forwarded to OpenCode sessions.
+- Run records persist both `backend` and `agent` so status comments, commit messages, PR titles, and debugging reflect the chosen execution path.
+- Current backend implementations:
+  - `codex`: local Codex SDK thread started in the configured checkout
+  - `opencode`: HTTP session created against the same configured checkout path
+
 ## Local Checkout Model
 
-Current design decision: CodeBridge executes in the configured checkout path directly.
+Current design decision: CodeBridge executes in the configured checkout path directly, regardless of backend.
 
 - No automatic `git worktree add`
 - No temporary clone per run
 - No repo-path indirection beyond `repos[].path`
+- No OpenCode-managed workspace/worktree creation in the current integration
 
 Execution sequence:
 
@@ -72,7 +89,7 @@ Execution sequence:
 2. Refuse to run if the checkout has uncommitted changes.
 3. Fetch `origin`.
 4. Create a new branch from the remote default branch.
-5. Run Codex inside that checkout.
+5. Run the selected backend inside that checkout.
 6. Commit, push, and open a PR from that same checkout.
 
 Why this design exists:
@@ -119,9 +136,10 @@ Trade-off:
                                         | enqueue/dequeue      | notify mirror
                                         v                      v
                                   +-----+----------------------+------+
-                                  |     Local Codex Runner (CLI)      |
-                                  |  - executes prompt in repo path    |
-                                  |  - returns assistant response      |
+                                  |     Local Agent Backend            |
+                                  |  - Codex SDK or OpenCode REST     |
+                                  |  - executes prompt in repo path   |
+                                  |  - returns assistant response     |
                                   +------------------------------------+
                                                          |
                                                          | HTTP lifecycle events (optional)
@@ -168,7 +186,7 @@ Trade-off:
 [Set labels: agent:managed + agent:in-progress when the surface supports labels]
           |
           v
-[Execute Codex locally]
+[Execute selected backend against resolved repo path]
           |
           +--> progress/idle => update status comment + labels
           +--> emit optional mirror events (in-progress/idle/completed)
@@ -186,7 +204,7 @@ Trade-off:
 2. Lifecycle: ensure label transitions are idempotent.
 3. Dedupe: keep source-key checks for polling/webhook/comment retries.
 4. Error UX: post actionable issue comments for tenant/auth/config failures.
-5. Tests: verify assignment bootstrap (or blocked precondition), issue mention, PR mention, discussion mention, managed plain comment, tenant override, control verbs, and status transitions.
+5. Tests: verify assignment bootstrap (or blocked precondition), issue mention, PR conversation mention, PR review comment mention, discussion mention, managed plain comment, tenant override, control verbs, and status transitions.
  - Discussion threads:
    - accept app mention bootstrap
    - require explicit mention/prefix for follow-up prompts
@@ -197,5 +215,9 @@ Trade-off:
 Validated on March 17, 2026:
 
 - The GitHub surface matrix should treat the PR case as part of the same test repo flow by default. `runGithubMentionE2ETest.ts` now reuses `--issue-repo` when `--pr-repo` is omitted.
-- Live protocol validation passed on `dzianisv/codebridge-test` for assignment bootstrap, issue mention, and PR mention.
+- Live protocol validation passed on `dzianisv/codebridge-test` for assignment bootstrap, issue mention, PR conversation mention, and PR review comment mention.
 - Discussion validation still needs a signed synthetic `discussion_comment` fallback on `VibeTechnologies/vibeteam-eval-hello-world` because the app lacks Discussions access there. Run creation is verified through persisted `sourceKey` evidence rather than an app-authored discussion status comment.
+- PR review comment ingestion is now implemented in both webhook and polling paths. Review comments are explicit-command only and reuse the PR conversation thread for lifecycle/status feedback.
+- Backend dispatch is now per repo config. `backend` defaults to `codex`; `opencode` uses the same installation/repo -> `repo.path` resolution before any HTTP call is made.
+- OpenCode integration uses server health, session creation, async prompt submission, session-status polling, and message polling. If the terminal assistant message contains only tool output, CodeBridge requests a final text summary in the same session.
+- Live OpenCode validation showed transient untracked artifacts such as `.reflection/`, `.tts/`, and `.tts-debug.log`. Dirty-check and commit staging now ignore those paths so PRs only include intended user changes.

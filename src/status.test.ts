@@ -67,6 +67,11 @@ describe("formatGitHubStatus", () => {
     expect(result).toContain("**Codex run run-1**")
   })
 
+  it("switches the header label for OpenCode runs", () => {
+    const result = formatGitHubStatus(makeRun({ backend: "opencode" }), makeSnapshot(), "running")
+    expect(result).toContain("**OpenCode run run-1**")
+  })
+
   it("includes code-formatted branch", () => {
     const result = formatGitHubStatus(makeRun({ branchName: "fix/issue" }), makeSnapshot(), "running")
     expect(result).toContain("Branch: `fix/issue`")
@@ -97,5 +102,10 @@ describe("formatFinalSummary", () => {
   it("includes summary text", () => {
     const result = formatFinalSummary(makeRun(), "Everything worked fine")
     expect(result).toContain("Everything worked fine")
+  })
+
+  it("uses the backend label in the final summary header", () => {
+    const result = formatFinalSummary(makeRun({ backend: "opencode" }), "Summary")
+    expect(result).toContain("OpenCode run run-1 complete")
   })
 })

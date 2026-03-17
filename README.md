@@ -1,8 +1,8 @@
 # CodeBridge
 
-CodeBridge turns GitHub issues, PR comments, and discussion comments into a control plane for a local coding agent.
+CodeBridge turns GitHub issues, PR conversation comments, PR review comments, and discussion comments into a control plane for a local coding agent.
 
-Assign or mention your GitHub App bot, and CodeBridge runs Codex against the mapped local repo, then posts progress, summaries, and PR links back to the same thread.
+Assign or mention your GitHub App bot, and CodeBridge runs the configured agent backend against the mapped local repo, then posts progress, summaries, and PR links back to the same thread.
 
 ## Install
 
@@ -38,9 +38,10 @@ git clone https://github.com/dzianisv/CodeBridge.git && cd CodeBridge && pnpm in
 |                                                                          enqueue          |
 |  +--------------------+     +---------------------+                     (BullMQ/memory)   |
 |  | Storage            | <-- | Worker              | <------------------------------------+ |
-|  | - SQLite/Postgres  |     | - Codex SDK thread  |                                       |
-|  | - runs/events      |     | - repo branch/PR    |                                       |
-|  | - poll high-water  |     | - status updates    |                                       |
+|  | - SQLite/Postgres  |     | - selected backend  |                                       |
+|  | - runs/events      |     | - Codex / OpenCode  |                                       |
+|  | - poll high-water  |     | - repo branch/PR    |                                       |
+|  |                    |     | - status updates    |                                       |
 |  +--------------------+     +----------+----------+                                       |
 |                                         |                                                  |
 |                             app-authored comments + labels + PR links                     |
@@ -52,11 +53,14 @@ git clone https://github.com/dzianisv/CodeBridge.git && cd CodeBridge && pnpm in
 
 ## Core Behavior
 
-1. A user assigns an issue to a native assignable actor or comments with the GitHub App handle.
+1. A user assigns an issue to a native assignable actor or comments with the GitHub App handle on an issue, PR conversation, PR review comment, or discussion.
 2. CodeBridge resolves tenant/repo, creates a run, and marks lifecycle labels on issue and PR conversation threads.
-3. Worker executes Codex against the configured local repo path.
+3. Worker executes the configured backend against the configured local repo path.
 4. Progress and final summary are posted by the GitHub App identity.
 5. If code changed, CodeBridge opens a PR and links it back to the originating GitHub thread.
+
+PR review comment note:
+CodeBridge treats PR review comments as explicit-command surfaces. Status and final responses are posted on the PR conversation thread, not inline in the review thread.
 
 ## GitHub Lifecycle Labels
 
@@ -98,12 +102,16 @@ Typical local dev defaults:
 ```bash
 export PORT=8788
 export ROLE=all
-export DATABASE_URL=sqlite://./data/codex-bridge.db
+export DATABASE_URL=sqlite://./data/codebridge.db
 export QUEUE_MODE=memory
 export GITHUB_POLL_INTERVAL=15
 export GITHUB_POLL_BACKFILL=false
-# optional safety guard: fail stuck codex turns after 5 minutes
+# optional safety guard: fail stuck agent turns after 5 minutes
 # export CODEX_TURN_TIMEOUT_MS=300000
+# optional OpenCode backend
+# export OPENCODE_BASE_URL=http://127.0.0.1:4096
+# export OPENCODE_USERNAME=opencode
+# export OPENCODE_PASSWORD=change-me
 # optional if config file is outside repo
 # export CONFIG_PATH=$HOME/.config/codebridge/config.yaml
 ```
@@ -184,6 +192,11 @@ tenants:
     repos:
       - fullName: "your-org/your-repo"
         path: "/absolute/path/to/local/clone"
+        backend: "codex"                  # optional; defaults to codex
+        # backend: "opencode"
+        # agent: "build"                  # backend-specific; currently used by OpenCode
+        model: "gpt-5.2-codex"
+        # model: "openai/gpt-5"           # OpenCode expects provider/model
         baseBranch: "main"
         branchPrefix: "codex"
     defaultRepo: "your-org/your-repo"
@@ -244,17 +257,58 @@ Important behavior:
 - GitHub issue, PR, and discussion commands use an exact `repos[].fullName` match.
 - `defaultRepo` is only a fallback for non-GitHub entrypoints such as Slack or `/codex/notify`.
 - If `repo.path` does not exist locally, the run cannot start.
+- Repo mapping is resolved before backend dispatch. A GitHub mention on `owner/repo-a` can only execute against the configured `repo.path` for `owner/repo-a`.
+
+## Backend Selection
+
+Each configured repo can select its execution backend. If `backend` is omitted, CodeBridge defaults to `codex`.
+
+```yaml
+secrets:
+  opencodePassword: "optional-shared-password"
+
+integrations:
+  opencode:
+    baseUrl: "http://127.0.0.1:4096"
+    username: "opencode"
+    enabled: true
+    timeoutMs: 300000
+    pollIntervalMs: 2000
+
+tenants:
+  - id: local
+    name: Local
+    repos:
+      - fullName: "owner/repo"
+        path: "/absolute/path/to/local/checkout"
+        backend: "opencode"
+        agent: "build"
+        model: "openai/gpt-5"
+        branchPrefix: "opencode"
+```
+
+Important behavior:
+
+- `backend` currently supports `codex` and `opencode`.
+- `agent` is backend-specific metadata and is currently forwarded to OpenCode session creation.
+- OpenCode model values must use `provider/model` format.
+- `integrations.opencode.*` can come from config or `OPENCODE_*` environment variables.
 
 ## Execution Model
 
-CodeBridge currently runs Codex directly in the configured local checkout path. It does not create an ephemeral clone or manage a dedicated `git worktree` per run.
+CodeBridge currently executes against the configured local checkout path. It does not create an ephemeral clone or manage a dedicated `git worktree` per run.
+
+Backend behavior:
+
+- `codex`: CodeBridge starts a local Codex SDK thread in `repo.path`.
+- `opencode`: CodeBridge still prepares the git branch locally, then creates an OpenCode session over HTTP and scopes that session to the same `repo.path`.
 
 Before starting a run, the worker:
 
 1. verifies the configured checkout is clean,
 2. fetches `origin`,
 3. creates a fresh branch from the remote default branch,
-4. runs Codex in that checkout,
+4. runs the selected backend in that checkout,
 5. commits and pushes from that same checkout.
 
 That keeps repo mapping deterministic, but it also means one configured checkout is one mutable execution target. If you need stronger isolation or parallelism for the same GitHub repo, provide separate local clones or worktrees as separate configured `repo.path` targets.
@@ -276,6 +330,11 @@ Comment in issue/PR/discussion:
 ### Follow-up
 
 On managed issues and PR conversation threads, plain non-bot comments are treated as follow-up prompts.
+
+PR review comments stay explicit:
+
+- every review-thread follow-up must still mention the app or use a configured prefix
+- responses are written back to the PR conversation thread
 
 ### Control verbs
 
@@ -316,7 +375,7 @@ pnpm test:github-assignment-evidence -- --repo dzianisv/codebridge-test --assign
 
 ### Surface protocol matrix
 
-Runs the operational GitHub surface matrix for assignment, issue mention, PR mention, and discussion mention:
+Runs the operational GitHub surface matrix for assignment, issue mention, PR conversation mention, PR review comment mention, and discussion mention:
 
 ```bash
 bun scripts/runGithubMentionE2ETest.ts
@@ -361,6 +420,7 @@ pnpm eval:view                  # open promptfoo results UI
 Integration test scripts (require live infra):
 
 ```bash
+pnpm test:opencode-integration
 pnpm test:github-polling
 pnpm test:github-protocol
 pnpm test:vibe-agents
@@ -378,5 +438,6 @@ pnpm test:vibe-agents
 
 - [Requirements](docs/requirements.md)
 - [Design](docs/design.md)
+- [OpenCode Backend Design](docs/opencode.md)
 - [GitHub Surface Test Protocol](docs/test-protocol.md)
 - [GitHub Assignee Setup](docs/github-assignee-setup.md)

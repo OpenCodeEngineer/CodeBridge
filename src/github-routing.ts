@@ -25,13 +25,20 @@ export function routeIssueCommentCommand(input: {
   }
 }
 
-export function routeDiscussionCommentCommand(input: {
+export function routeExplicitGitHubCommand(input: {
   body: string
   prefixes: string[]
 }): RoutedGitHubCommand | null {
   const command = extractCommand(input.body, input.prefixes)
   if (!command) return null
   return { ...command, explicit: true }
+}
+
+export function routeDiscussionCommentCommand(input: {
+  body: string
+  prefixes: string[]
+}): RoutedGitHubCommand | null {
+  return routeExplicitGitHubCommand(input)
 }
 
 export function shouldRelayManagedIssueCommand(input: {

@@ -12,6 +12,8 @@ loadDotenv()
 const repoSchema = z.object({
   fullName: z.string(),
   path: z.string(),
+  backend: z.enum(["codex", "opencode"]).optional(),
+  agent: z.string().optional(),
   model: z.string().optional(),
   baseBranch: z.string().optional(),
   branchPrefix: z.string().optional()
@@ -43,7 +45,8 @@ const secretsSchema = z.object({
   githubPrivateKey: z.string().optional(),
   githubWebhookSecret: z.string().optional(),
   codexNotifyToken: z.string().optional(),
-  vibeAgentsToken: z.string().optional()
+  vibeAgentsToken: z.string().optional(),
+  opencodePassword: z.string().optional()
 })
 
 const vibeAgentsSchema = z.object({
@@ -55,8 +58,18 @@ const vibeAgentsSchema = z.object({
   timeoutMs: z.number().int().positive().optional()
 })
 
+const opencodeSchema = z.object({
+  baseUrl: z.string().url(),
+  username: z.string().optional(),
+  password: z.string().optional(),
+  enabled: z.boolean().optional(),
+  timeoutMs: z.number().int().positive().optional(),
+  pollIntervalMs: z.number().int().positive().optional()
+})
+
 const integrationsSchema = z.object({
-  vibeAgents: vibeAgentsSchema.optional()
+  vibeAgents: vibeAgentsSchema.optional(),
+  opencode: opencodeSchema.optional()
 })
 
 const appSchema = z.object({
@@ -89,6 +102,12 @@ export type EnvConfig = {
   vibeAgentsProject?: string
   vibeAgentsEnabled?: boolean
   vibeAgentsTimeoutMs?: number
+  opencodeBaseUrl?: string
+  opencodeUsername?: string
+  opencodePassword?: string
+  opencodeEnabled?: boolean
+  opencodeTimeoutMs?: number
+  opencodePollIntervalMs?: number
   configPath: string
 }
 
@@ -105,6 +124,10 @@ export function loadEnv(): EnvConfig {
   const codexTurnTimeoutMs = parseInt(process.env.CODEX_TURN_TIMEOUT_MS ?? "300000", 10)
   const vibeAgentsTimeoutMsRaw = process.env.VIBE_AGENTS_TIMEOUT_MS
   const vibeAgentsTimeoutMsParsed = vibeAgentsTimeoutMsRaw ? parseInt(vibeAgentsTimeoutMsRaw, 10) : undefined
+  const opencodeTimeoutMsRaw = process.env.OPENCODE_TIMEOUT_MS
+  const opencodeTimeoutMsParsed = opencodeTimeoutMsRaw ? parseInt(opencodeTimeoutMsRaw, 10) : undefined
+  const opencodePollIntervalMsRaw = process.env.OPENCODE_POLL_INTERVAL_MS
+  const opencodePollIntervalMsParsed = opencodePollIntervalMsRaw ? parseInt(opencodePollIntervalMsRaw, 10) : undefined
 
   return {
     port,
@@ -130,6 +153,12 @@ export function loadEnv(): EnvConfig {
     vibeAgentsProject: process.env.VIBE_AGENTS_PROJECT,
     vibeAgentsEnabled: process.env.VIBE_AGENTS_ENABLED ? parseBoolean(process.env.VIBE_AGENTS_ENABLED) : undefined,
     vibeAgentsTimeoutMs: Number.isFinite(vibeAgentsTimeoutMsParsed) ? vibeAgentsTimeoutMsParsed : undefined,
+    opencodeBaseUrl: process.env.OPENCODE_BASE_URL,
+    opencodeUsername: process.env.OPENCODE_USERNAME ?? process.env.OPENCODE_SERVER_USERNAME,
+    opencodePassword: process.env.OPENCODE_PASSWORD ?? process.env.OPENCODE_SERVER_PASSWORD,
+    opencodeEnabled: process.env.OPENCODE_ENABLED ? parseBoolean(process.env.OPENCODE_ENABLED) : undefined,
+    opencodeTimeoutMs: Number.isFinite(opencodeTimeoutMsParsed) ? opencodeTimeoutMsParsed : undefined,
+    opencodePollIntervalMs: Number.isFinite(opencodePollIntervalMsParsed) ? opencodePollIntervalMsParsed : undefined,
     configPath
   }
 }

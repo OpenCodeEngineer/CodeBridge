@@ -44,6 +44,12 @@ const main = async () => {
         codexPath: env.codexPath,
         codexApiKey: env.codexApiKey,
         codexTurnTimeoutMs: env.codexTurnTimeoutMs,
+        opencodeBaseUrl: integrations.opencode?.baseUrl,
+        opencodeUsername: integrations.opencode?.username,
+        opencodePassword: integrations.opencode?.password,
+        opencodeEnabled: integrations.opencode?.enabled ?? false,
+        opencodeTimeoutMs: integrations.opencode?.timeoutMs,
+        opencodePollIntervalMs: integrations.opencode?.pollIntervalMs,
         githubAppId: secrets.githubAppId,
         githubPrivateKey: secrets.githubPrivateKey
       },
@@ -82,6 +88,8 @@ const main = async () => {
         repoPath,
         sourceKey: input.sourceKey,
         prompt,
+        backend: repo.backend,
+        agent: repo.agent,
         model: repo.model,
         branchPrefix: repo.branchPrefix,
         github: input.github
@@ -121,6 +129,8 @@ const main = async () => {
         repoFullName: repo.fullName,
         repoPath,
         prompt: input.prompt,
+        backend: repo.backend,
+        agent: repo.agent,
         model: repo.model,
         branchPrefix: repo.branchPrefix,
         slack: input.slack,
@@ -150,7 +160,8 @@ function resolveRuntimeSecrets(config: AppConfig, env: ReturnType<typeof loadEnv
     githubPrivateKey: config.secrets?.githubPrivateKey ?? env.githubPrivateKey,
     githubWebhookSecret: config.secrets?.githubWebhookSecret ?? env.githubWebhookSecret,
     codexNotifyToken: config.secrets?.codexNotifyToken ?? env.codexNotifyToken,
-    vibeAgentsToken: config.secrets?.vibeAgentsToken ?? env.vibeAgentsToken
+    vibeAgentsToken: config.secrets?.vibeAgentsToken ?? env.vibeAgentsToken,
+    opencodePassword: config.secrets?.opencodePassword ?? env.opencodePassword
   }
 }
 
@@ -160,18 +171,24 @@ function resolveRuntimeIntegrations(
   secrets: ReturnType<typeof resolveRuntimeSecrets>
 ) {
   const configuredVibe = config.integrations?.vibeAgents
-  if (!configuredVibe && !env.vibeAgentsEndpoint) {
-    return { vibeAgents: undefined }
-  }
+  const configuredOpenCode = config.integrations?.opencode
 
   return {
-    vibeAgents: {
+    vibeAgents: !configuredVibe && !env.vibeAgentsEndpoint ? undefined : {
       endpoint: env.vibeAgentsEndpoint ?? configuredVibe?.endpoint ?? "",
       token: env.vibeAgentsToken ?? configuredVibe?.token ?? secrets.vibeAgentsToken,
       author: env.vibeAgentsAuthor ?? configuredVibe?.author,
       project: env.vibeAgentsProject ?? configuredVibe?.project,
       enabled: env.vibeAgentsEnabled ?? configuredVibe?.enabled ?? true,
       timeoutMs: env.vibeAgentsTimeoutMs ?? configuredVibe?.timeoutMs
+    },
+    opencode: !configuredOpenCode && !env.opencodeBaseUrl ? undefined : {
+      baseUrl: env.opencodeBaseUrl ?? configuredOpenCode?.baseUrl ?? "",
+      username: env.opencodeUsername ?? configuredOpenCode?.username,
+      password: env.opencodePassword ?? configuredOpenCode?.password ?? secrets.opencodePassword,
+      enabled: env.opencodeEnabled ?? configuredOpenCode?.enabled ?? true,
+      timeoutMs: env.opencodeTimeoutMs ?? configuredOpenCode?.timeoutMs,
+      pollIntervalMs: env.opencodePollIntervalMs ?? configuredOpenCode?.pollIntervalMs
     }
   }
 }

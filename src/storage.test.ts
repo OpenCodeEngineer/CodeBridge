@@ -166,6 +166,25 @@ describe("SQLite store CRUD", () => {
     expect(run!.slack!.userId).toBe("U789")
   })
 
+  it("stores backend and agent selection", async () => {
+    const { createSqliteStore } = await import("./storage.js")
+    const store = createSqliteStore(":memory:")
+
+    await store.createRun({
+      id: "run-backend",
+      tenantId: "t1",
+      repoFullName: "org/repo",
+      repoPath: "/tmp/repo",
+      prompt: "test",
+      backend: "opencode",
+      agent: "build"
+    })
+
+    const run = await store.getRun("run-backend")
+    expect(run!.backend).toBe("opencode")
+    expect(run!.agent).toBe("build")
+  })
+
   it("source_key deduplication works", async () => {
     const { createSqliteStore } = await import("./storage.js")
     const store = createSqliteStore(":memory:")
