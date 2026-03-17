@@ -1,11 +1,17 @@
 import type { RequestHandler } from "express"
-import { createInstallationClient, formatPrivateKey, type InstallationClient } from "./github-auth.js"
+import type { InstallationClient } from "./github-auth.js"
 import { syncIssueLifecycleState } from "./github-issue-state.js"
 import type { AppConfig, GitHubContext } from "./types.js"
 import { findTenantRepoByFullName, findTenantRepoByGitRemote, findTenantRepoByPath, type TenantRepoMatch } from "./repo.js"
 import { parseIssueReference } from "./commands.js"
 import { logger } from "./logger.js"
 import { registerSessionBinding } from "./codex-session-relay.js"
+import {
+  createGitHubInstallationClientFactory,
+  getTenantGithubAppBinding,
+  selectGithubAppKeyForBackend,
+  type GitHubAppMap
+} from "./github-apps.js"
 
 const MANAGED_LABEL = "agent:managed"
 const IN_PROGRESS_LABEL = "agent:in-progress"
@@ -28,31 +34,12 @@ type NormalizedTurn = {
 
 export function createCodexNotifyHandler(params: {
   config: AppConfig
-  githubAppId?: number
-  githubPrivateKey?: string
+  githubApps?: GitHubAppMap
   ingestToken?: string
 }): RequestHandler {
-  const { config, githubAppId, githubPrivateKey, ingestToken } = params
+  const { config, githubApps, ingestToken } = params
   const sessionBindings = new Map<string, SessionBinding>()
-  const clientCache = new Map<number, { client: InstallationClient; expiresAt: number }>()
-
-  const getClient = async (installationId: number): Promise<InstallationClient> => {
-    const cached = clientCache.get(installationId)
-    if (cached && cached.expiresAt > Date.now()) {
-      return cached.client
-    }
-    if (!githubAppId || !githubPrivateKey) {
-      throw new Error("GitHub app credentials are required for Codex notify integration")
-    }
-
-    const client = await createInstallationClient({
-      appId: githubAppId,
-      privateKey: formatPrivateKey(githubPrivateKey),
-      installationId
-    })
-    clientCache.set(installationId, { client, expiresAt: Date.now() + CLIENT_TTL_MS })
-    return client
-  }
+  const getClient = githubApps ? createGitHubInstallationClientFactory(githubApps, CLIENT_TTL_MS) : null
 
   return async (req, res) => {
     try {
@@ -99,7 +86,10 @@ export function createCodexNotifyHandler(params: {
         github
       })
 
-      const client = await getClient(github.installationId)
+      if (!getClient) {
+        throw new Error("GitHub app credentials are required for Codex notify integration")
+      }
+      const client = await getClient(github.appKey ?? "default", github.installationId)
       await withConsistencyRetry(() => syncIssueLifecycleState(client, github, "in-progress"))
 
       const existingComments = await withConsistencyRetry(() => listIssueComments(client, github))
@@ -151,7 +141,7 @@ async function getOrCreateBinding(input: {
   repoMatch: TenantRepoMatch
   config: AppConfig
   sessionBindings: Map<string, SessionBinding>
-  getClient: (installationId: number) => Promise<InstallationClient>
+  getClient: ((appKey: string, installationId: number) => Promise<InstallationClient>) | null
 }): Promise<SessionBinding> {
   const { normalized, repoMatch, config, sessionBindings, getClient } = input
   const existing = sessionBindings.get(normalized.sessionId)
@@ -169,12 +159,20 @@ async function getOrCreateBinding(input: {
   })
 
   const target = resolveTargetRepoMatch(config, repoMatch, explicitIssue)
-  const installationId = target.tenant.github?.installationId
+  const appKey = selectGithubAppKeyForBackend(target.tenant, target.repo, "codex")
+  if (!appKey) {
+    throw new Error(`Tenant '${target.tenant.id}' has no GitHub App configured for the codex backend`)
+  }
+  const githubBinding = getTenantGithubAppBinding(target.tenant, appKey)
+  const installationId = githubBinding?.installationId
   if (!installationId) {
-    throw new Error(`Tenant '${target.tenant.id}' has no github.installationId configured`)
+    throw new Error(`Tenant '${target.tenant.id}' has no GitHub installation configured for app '${appKey}'`)
+  }
+  if (!getClient) {
+    throw new Error("GitHub app credentials are required for Codex notify integration")
   }
 
-  const client = await getClient(installationId)
+  const client = await getClient(appKey, installationId)
 
   let github: GitHubContext
   let createdIssue = false
@@ -189,6 +187,7 @@ async function getOrCreateBinding(input: {
     )
 
     github = {
+      appKey,
       owner: explicitIssue.owner,
       repo: explicitIssue.repo,
       issueNumber: explicitIssueNumber,
@@ -205,6 +204,7 @@ async function getOrCreateBinding(input: {
     })
     if (recovered) {
       github = {
+        appKey,
         owner: defaultOwner,
         repo: defaultRepo,
         issueNumber: recovered.number,
@@ -225,6 +225,7 @@ async function getOrCreateBinding(input: {
       )
 
       github = {
+        appKey,
         owner: defaultOwner,
         repo: defaultRepo,
         issueNumber: created.data.number,

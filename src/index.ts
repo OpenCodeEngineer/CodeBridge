@@ -13,6 +13,7 @@ import { startGitHubPolling } from "./github-poll.js"
 import { createCodexNotifyHandler } from "./codex-notify.js"
 import type { AppConfig } from "./types.js"
 import { createVibeAgentsSink } from "./vibe-agents.js"
+import { getTenantGithubAppBinding, type GitHubAppMap, selectGithubAppKeyForBackend } from "./github-apps.js"
 
 const main = async () => {
   const env = loadEnv()
@@ -31,8 +32,7 @@ const main = async () => {
     store,
     queue,
     slackClient,
-    githubAppId: secrets.githubAppId,
-    githubPrivateKey: secrets.githubPrivateKey,
+    githubApps: secrets.githubApps,
     vibeAgents: vibeAgentsSink
   })
 
@@ -50,8 +50,7 @@ const main = async () => {
         opencodeEnabled: integrations.opencode?.enabled ?? false,
         opencodeTimeoutMs: integrations.opencode?.timeoutMs,
         opencodePollIntervalMs: integrations.opencode?.pollIntervalMs,
-        githubAppId: secrets.githubAppId,
-        githubPrivateKey: secrets.githubPrivateKey
+        githubApps: secrets.githubApps
       },
       vibeAgents: vibeAgentsSink
     })
@@ -67,15 +66,13 @@ const main = async () => {
     })
 
     const github = createGitHubApp(config, store, {
-      githubAppId: secrets.githubAppId,
-      githubPrivateKey: secrets.githubPrivateKey,
-      githubWebhookSecret: secrets.githubWebhookSecret,
+      githubApps: secrets.githubApps,
       codexPath: env.codexPath,
       codexTurnTimeoutMs: env.codexTurnTimeoutMs
     }, async input => {
       const tenant = config.tenants.find(t => t.id === input.tenantId)
       if (!tenant) return
-      const repo = resolveRepo(tenant, input.repoFullName)
+      const repo = resolveRepo(tenant, input.repoFullName, input.github.appKey)
       if (!repo) return
       const repoPath = await ensureRepoPath(repo)
       const prompt = input.commandType === "reply"
@@ -102,8 +99,7 @@ const main = async () => {
 
     app.post("/codex/notify", createCodexNotifyHandler({
       config,
-      githubAppId: secrets.githubAppId,
-      githubPrivateKey: secrets.githubPrivateKey,
+      githubApps: secrets.githubApps,
       ingestToken: secrets.codexNotifyToken
     }))
 
@@ -117,11 +113,15 @@ const main = async () => {
       if (!repo) return
       const repoPath = await ensureRepoPath(repo)
       const [owner, repoName] = repo.fullName.split("/")
-      const githubContext = tenant.github?.installationId ? {
+      const backend = repo.backend ?? "codex"
+      const appKey = selectGithubAppKeyForBackend(tenant, repo, backend)
+      const githubBinding = appKey ? getTenantGithubAppBinding(tenant, appKey) : null
+      const githubContext = githubBinding?.installationId ? {
+        appKey: appKey ?? undefined,
         owner: input.issue?.owner ?? owner,
         repo: input.issue?.repo ?? repoName,
         issueNumber: input.issue?.issueNumber,
-        installationId: tenant.github.installationId
+        installationId: githubBinding.installationId
       } : undefined
 
       await runService.createRun({
@@ -129,7 +129,7 @@ const main = async () => {
         repoFullName: repo.fullName,
         repoPath,
         prompt: input.prompt,
-        backend: repo.backend,
+        backend,
         agent: repo.agent,
         model: repo.model,
         branchPrefix: repo.branchPrefix,
@@ -143,8 +143,7 @@ const main = async () => {
       store,
       runService,
       env: {
-        githubAppId: secrets.githubAppId,
-        githubPrivateKey: secrets.githubPrivateKey,
+        githubApps: secrets.githubApps,
         githubPollIntervalSec: env.githubPollIntervalSec,
         githubPollBackfill: env.githubPollBackfill,
         codexPath: env.codexPath,
@@ -155,10 +154,23 @@ const main = async () => {
 }
 
 function resolveRuntimeSecrets(config: AppConfig, env: ReturnType<typeof loadEnv>) {
+  const githubApps: GitHubAppMap = {
+    ...(config.secrets?.githubApps ?? {})
+  }
+
+  const configuredDefault = githubApps.default ?? {}
+  const resolvedDefault = {
+    ...configuredDefault,
+    appId: configuredDefault.appId ?? env.githubAppId,
+    privateKey: configuredDefault.privateKey ?? env.githubPrivateKey,
+    webhookSecret: configuredDefault.webhookSecret ?? env.githubWebhookSecret
+  }
+  if (resolvedDefault.appId || resolvedDefault.privateKey || resolvedDefault.webhookSecret || resolvedDefault.commandPrefixes) {
+    githubApps.default = resolvedDefault
+  }
+
   return {
-    githubAppId: config.secrets?.githubAppId ?? env.githubAppId,
-    githubPrivateKey: config.secrets?.githubPrivateKey ?? env.githubPrivateKey,
-    githubWebhookSecret: config.secrets?.githubWebhookSecret ?? env.githubWebhookSecret,
+    githubApps,
     codexNotifyToken: config.secrets?.codexNotifyToken ?? env.codexNotifyToken,
     vibeAgentsToken: config.secrets?.vibeAgentsToken ?? env.vibeAgentsToken,
     opencodePassword: config.secrets?.opencodePassword ?? env.opencodePassword

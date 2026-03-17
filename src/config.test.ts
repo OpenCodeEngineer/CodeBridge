@@ -177,4 +177,95 @@ tenants:
     expect(config.tenants[0].repos[0].model).toBe("openai/gpt-5")
     await fs.rm(tmpDir, { recursive: true })
   })
+
+  it("normalizes multi-app GitHub config and repo app overrides", async () => {
+    const { loadConfig } = await import("./config.js")
+    const fs = await import("node:fs/promises")
+    const path = await import("node:path")
+    const os = await import("node:os")
+    const tmpDir = await fs.mkdtemp(path.join(os.default.tmpdir(), "cb-test-"))
+    const configPath = path.join(tmpDir, "multi-app.yaml")
+    const yaml = `
+secrets:
+  githubApps:
+    Codex:
+      appId: 101
+      privateKey: codex-key
+      webhookSecret: codex-webhook
+      commandPrefixes:
+        - CodexApp
+    opencode:
+      appId: 202
+      privateKey: opencode-key
+      webhookSecret: opencode-webhook
+
+tenants:
+  - id: test-tenant
+    name: Test
+    github:
+      apps:
+        - appKey: Codex
+          installationId: 3001
+          assignmentAssignees:
+            - CodexApp
+        - appKey: OpenCode
+          installationId: 3002
+          commandPrefixes:
+            - OpenCodeApp
+    repos:
+      - fullName: org/repo
+        path: /tmp/repo
+        backend: codex
+        githubApps:
+          OpenCode:
+            backend: opencode
+            agent: build
+            model: openai/gpt-5
+`
+    await fs.writeFile(configPath, yaml)
+    const config = await loadConfig(configPath)
+    expect(config.secrets?.githubApps?.codex?.appId).toBe(101)
+    expect(config.secrets?.githubApps?.opencode?.appId).toBe(202)
+    expect(config.tenants[0].github?.apps.map(app => app.appKey)).toEqual(["codex", "opencode"])
+    expect(config.tenants[0].repos[0].githubApps?.opencode?.backend).toBe("opencode")
+    expect(config.tenants[0].repos[0].githubApps?.opencode?.agent).toBe("build")
+    await fs.rm(tmpDir, { recursive: true })
+  })
+
+  it("normalizes legacy single-app GitHub config into the default app key", async () => {
+    const { loadConfig } = await import("./config.js")
+    const fs = await import("node:fs/promises")
+    const path = await import("node:path")
+    const os = await import("node:os")
+    const tmpDir = await fs.mkdtemp(path.join(os.default.tmpdir(), "cb-test-"))
+    const configPath = path.join(tmpDir, "legacy-github.yaml")
+    const yaml = `
+secrets:
+  githubAppId: 123
+  githubPrivateKey: legacy-key
+  githubWebhookSecret: legacy-webhook
+
+tenants:
+  - id: test-tenant
+    name: Test
+    github:
+      installationId: 456
+      assignmentAssignees:
+        - CodexApp
+    repos:
+      - fullName: org/repo
+        path: /tmp/repo
+`
+    await fs.writeFile(configPath, yaml)
+    const config = await loadConfig(configPath)
+    expect(config.secrets?.githubApps?.default?.appId).toBe(123)
+    expect(config.tenants[0].github?.apps).toEqual([{
+      appKey: "default",
+      installationId: 456,
+      repoAllowlist: undefined,
+      commandPrefixes: undefined,
+      assignmentAssignees: ["CodexApp"]
+    }])
+    await fs.rm(tmpDir, { recursive: true })
+  })
 })

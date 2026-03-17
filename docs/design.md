@@ -6,14 +6,14 @@ This design treats GitHub issue and PR conversation threads as the primary contr
 
 ## Core Behavior
 
-1. Bootstrap via issue assignment to an assignment trigger handle (native assignable actor, or configured `assignmentAssignees`), or via bootstrap mention (`@CodexEngineer ...`) on:
+1. Bootstrap via issue assignment to an assignment trigger handle (native assignable actor, or configured `assignmentAssignees`), or via bootstrap mention to one of the configured GitHub Apps (`@CodexApp ...`, `@OpenCodeApp ...`) on:
    - issue comments
    - PR conversation comments
    - PR review comments
    - discussion comments
    creates or resumes a run.
 2. Issue and PR conversation threads are marked managed (`agent:managed`).
-3. After that, plain human comments on the same managed issue or PR thread are interpreted as follow-up prompts.
+3. After that, plain human comments on the same managed issue or PR thread are interpreted as follow-up prompts only for the app that owns the latest run on that thread.
 4. PR review comments and discussion threads remain explicit-command surfaces; follow-up comments there still require mention/prefix.
 5. Bridge executes the configured backend against the resolved local checkout and writes status/answers back to the originating GitHub thread.
 
@@ -51,7 +51,7 @@ For GitHub-originated events, CodeBridge does not inspect the process cwd or try
 Resolution flow:
 
 1. Read `installation.id` and `repository.full_name` from the GitHub webhook or polling payload.
-2. Resolve the default tenant by exact `github.installationId` match.
+2. Resolve the default tenant by exact `github.apps[].appKey + installationId` match.
 3. If installation id is absent or no tenant matches, fall back to exact repo match on `repos[].fullName`.
 4. If the command includes `tenant:<id>`, validate that the hinted tenant:
    - is GitHub-enabled,
@@ -64,6 +64,16 @@ Resolution flow:
 This means a mention on `owner/repo-a` will not be remapped to `owner/repo-b` through `defaultRepo`. `defaultRepo` is reserved for non-GitHub entrypoints that do not already carry a concrete GitHub repository identity.
 
 Backend dispatch happens only after this repo resolution completes. The selected backend receives the resolved `repos[].path`; it does not infer a repository or worktree from the mention text, process cwd, or agent state.
+
+## Multi-App GitHub Identity
+
+- GitHub App credentials are now keyed under `secrets.githubApps.<appKey>`.
+- Tenants bind installations per app under `github.apps[]`.
+- Repos can override backend/agent/model/branch settings per app with `repos[].githubApps.<appKey>`.
+- Webhook paths are app-specific: `/github/webhook/<appKey>`.
+- Poll state is app-specific to avoid collisions when the same repo is watched by multiple apps.
+- Run records persist `github.appKey`, and all outbound GitHub writes reuse that same app identity.
+- Explicit mention of a second app on a managed thread starts a new run for that app instead of relaying into the prior app’s session.
 
 ## Agent Backend Selection
 
@@ -215,6 +225,7 @@ Trade-off:
 Validated on March 17, 2026:
 
 - The GitHub surface matrix should treat the PR case as part of the same test repo flow by default. `runGithubMentionE2ETest.ts` now reuses `--issue-repo` when `--pr-repo` is omitted.
+- Multi-app routing now supports concurrent `codex` and `opencode` GitHub Apps against the same repository. App identity is part of webhook routing, poll high-water marks, run persistence, and managed-thread ownership checks.
 - Live protocol validation passed on `dzianisv/codebridge-test` for assignment bootstrap, issue mention, PR conversation mention, and PR review comment mention.
 - Discussion validation still needs a signed synthetic `discussion_comment` fallback on `VibeTechnologies/vibeteam-eval-hello-world` because the app lacks Discussions access there. Run creation is verified through persisted `sourceKey` evidence rather than an app-authored discussion status comment.
 - PR review comment ingestion is now implemented in both webhook and polling paths. Review comments are explicit-command only and reuse the PR conversation thread for lifecycle/status feedback.

@@ -20,6 +20,8 @@ Make GitHub issue and PR conversation threads behave like a chat surface with th
   - GitHub App bot account (if assignable in that repo), or
   - one of `github.assignmentAssignees` configured for the tenant.
 - A human can also start a run by mentioning the GitHub App in:
+- A deployment can support multiple GitHub Apps at the same time, with app identity selecting the backend route for the same repository when configured.
+- A human can also start a run by mentioning the GitHub App in:
   - issue comments
   - PR conversation comments
   - PR review comments
@@ -33,6 +35,8 @@ Make GitHub issue and PR conversation threads behave like a chat surface with th
 - Once an issue or PR conversation thread is marked as agent-managed, plain human comments on that managed thread are treated as follow-up prompts.
 - Follow-up comments must not require command prefixes (`codex:`, `/codex`, etc.).
 - Mentioning the app remains allowed but optional after bootstrap.
+- Plain follow-up comments on managed issue/PR conversation threads must be consumed only by the app that owns the latest run on that thread.
+- Explicitly mentioning a different app on the same managed thread must start a new run under that app instead of relaying into the previous app session.
 - PR review comments remain explicit-command only: each follow-up must still mention the app or use a configured prefix, and responses are written back to the PR conversation thread.
 - Discussion follow-up remains explicit-command only: each follow-up must still mention the app or use a configured prefix.
 - Explicit `status`, `pause`, and `resume` commands must work on managed issue and PR conversation threads without being misrouted as normal follow-up text.
@@ -49,10 +53,12 @@ Make GitHub issue and PR conversation threads behave like a chat surface with th
   3. repo-to-tenant default mapping
 - If no valid tenant can be resolved, bridge must post an actionable error comment.
 - For GitHub-originated commands, repo selection inside the chosen tenant must use exact `repository.full_name` matching against `repos[].fullName`.
+- Tenant GitHub installation selection must be app-aware: `github.apps[].appKey + installationId`.
 - `defaultRepo` must not remap one GitHub repository event onto a different configured repository.
 - The configured local `repos[].path` must exist before a run is enqueued; otherwise the bridge must fail fast with actionable diagnostics.
 - Repo backend selection is per configured repo:
   - `repos[].backend` chooses the execution backend and defaults to `codex`
+  - `repos[].githubApps.<appKey>` can override backend/agent/model/branch settings for that app
   - `repos[].agent` stores backend-specific agent selection
   - backend integrations receive the resolved `repos[].path`; they do not infer a repo or worktree from the GitHub mention, process cwd, or agent state
 
@@ -84,6 +90,7 @@ Make GitHub issue and PR conversation threads behave like a chat surface with th
 ### R7. Identity
 
 - Replies on GitHub must be authored by the GitHub App bot identity (not a personal user token identity).
+- The same GitHub App identity that ingests a run must also author that run’s outbound comments, label updates, and PR creation.
 
 ### R9. Test Protocol Coverage
 
@@ -118,6 +125,7 @@ Make GitHub issue and PR conversation threads behave like a chat surface with th
 - First interaction uses assignment-to-app or app mention; later messages on the managed issue or PR conversation thread can be plain text.
 - Discussion follow-up remains explicit mention/prefix based.
 - `tenant:<id>` reliably routes commands to the desired tenant.
+- Two GitHub Apps can watch the same repository concurrently without poll-state collisions or cross-app managed-thread misrouting.
 - Backend selection is deterministic per configured repo and still uses the exact configured local checkout path.
 - Issue labels reflect run state transitions.
 - Assistant responses are posted by the app bot account.

@@ -13,6 +13,9 @@ This protocol validates the exact interaction surfaces required for CodeBridge:
 - CodeBridge is running in polling mode:
   - `GITHUB_POLL_INTERVAL` set (for example `10`)
   - `GITHUB_POLL_BACKFILL=false`
+- If webhook mode is being validated, target the app-specific webhook path:
+  - `/github/webhook/codex`
+  - `/github/webhook/opencode`
 - Target repos are in tenant `repoAllowlist` and `repos` config.
 - App handle is resolvable (for example `@codexengineer`).
 - For assignment bootstrap:
@@ -39,6 +42,8 @@ pnpm test:github-protocol \
 ```
 
 If `--pr-repo` is omitted, the runner reuses `--issue-repo`.
+
+In multi-app mode, run the protocol once per app key/backend route you want to validate.
 
 Strict `@codexengineer` mission gate run:
 
@@ -95,7 +100,7 @@ bun scripts/runGithubMentionE2ETest.ts \
   --assignment-handle @openai-code-agent \
   --timeout 240 \
   --poll 5 \
-  --hook-target http://127.0.0.1:8788/github/webhook \
+  --hook-target http://127.0.0.1:8788/github/webhook/codex \
   --webhook-secret codebridge-eval-secret \
   --database-url sqlite:///var/folders/gq/0rs975rd2b9bj2h6zkymwx6r0000gn/T/codebridge-e2e-wvi_bl7g/codebridge-e2e.db
 ```
@@ -114,3 +119,11 @@ Result matrix:
 - `discussion-mention`: `pass`
   - mode: synthetic `discussion_comment` webhook fallback
   - evidence: report `reports/codebridge-test-report-2026-03-17T16-12-48-856Z.json`
+
+Additional multi-app customer-flow verification on March 17, 2026:
+
+- `issue-mention` via `@OpenCodeApp`: `pass`
+  - issue: [#524](https://github.com/dzianisv/codebridge-test/issues/524)
+  - final status comment: [#issuecomment-4078045205](https://github.com/dzianisv/codebridge-test/issues/524#issuecomment-4078045205)
+  - resulting PR: [#525](https://github.com/dzianisv/codebridge-test/pull/525)
+  - persistence evidence: sqlite run `ZkkIiFQf` stored `status=succeeded`, `backend=opencode`, `github_app_key=opencode`, `pr_url=https://github.com/dzianisv/codebridge-test/pull/525`

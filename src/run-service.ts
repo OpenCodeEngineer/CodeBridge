@@ -3,7 +3,6 @@ import type { RunStore } from "./storage.js"
 import type { AgentBackend, SlackContext, GitHubContext, RunRecord } from "./types.js"
 import type { WebClient } from "@slack/web-api"
 import { postSlackStatus } from "./slack.js"
-import { createInstallationClient, formatPrivateKey } from "./github-auth.js"
 import { formatGitHubStatus, formatSlackStatus } from "./status.js"
 import { syncIssueLifecycleState } from "./github-issue-state.js"
 import { isDiscussionSourceKey, postDiscussionCommentFromContext } from "./github-discussions.js"
@@ -12,6 +11,7 @@ import type { RunQueue } from "./queue.js"
 import { logger } from "./logger.js"
 import type { VibeAgentsSink } from "./vibe-agents.js"
 import { resolveAgentBackend } from "./agent-backend.js"
+import { createGitHubInstallationClientFactory, type GitHubAppMap } from "./github-apps.js"
 
 export type RunService = {
   createRun: (input: {
@@ -33,11 +33,11 @@ export function createRunService(params: {
   store: RunStore
   queue: RunQueue
   slackClient?: WebClient
-  githubAppId?: number
-  githubPrivateKey?: string
+  githubApps?: GitHubAppMap
   vibeAgents?: VibeAgentsSink
 }) : RunService {
-  const { store, queue, slackClient, githubAppId, githubPrivateKey, vibeAgents } = params
+  const { store, queue, slackClient, githubApps, vibeAgents } = params
+  const getGitHubClient = githubApps ? createGitHubInstallationClientFactory(githubApps) : null
 
   const createRun = async (input: {
     tenantId: string
@@ -54,17 +54,17 @@ export function createRunService(params: {
   }) => {
     const id = nanoid(8)
     let github = input.github ? { ...input.github } : undefined
-    let githubClient: Awaited<ReturnType<typeof createInstallationClient>> | null = null
+    let githubClient: Awaited<ReturnType<NonNullable<typeof getGitHubClient>>> | null = null
 
-    if (github && githubAppId && githubPrivateKey && github.installationId) {
+    if (github && getGitHubClient && github.installationId) {
       try {
-        githubClient = await createInstallationClient({
-          appId: githubAppId,
-          privateKey: formatPrivateKey(githubPrivateKey),
-          installationId: github.installationId
-        })
+        githubClient = await getGitHubClient(github.appKey ?? "default", github.installationId)
       } catch (error) {
-        logger.warn({ err: error, tenantId: input.tenantId }, "GitHub client bootstrap failed")
+        logger.warn({
+          err: error,
+          tenantId: input.tenantId,
+          appKey: github.appKey ?? "default"
+        }, "GitHub client bootstrap failed")
       }
     }
 

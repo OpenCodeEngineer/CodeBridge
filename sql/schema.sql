@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS runs (
   slack_thread_ts TEXT,
   slack_message_ts TEXT,
   slack_user_id TEXT,
+  github_app_key TEXT,
   github_owner TEXT,
   github_repo TEXT,
   github_issue_number INTEGER,
@@ -44,6 +45,7 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS github_trigger_comment_id BIGINT;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS source_key TEXT;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS backend TEXT;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS agent TEXT;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS github_app_key TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS runs_source_key_idx ON runs(source_key);
 
 CREATE TABLE IF NOT EXISTS github_poll_state (

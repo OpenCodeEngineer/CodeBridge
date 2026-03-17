@@ -1,8 +1,8 @@
 # CodeBridge
 
-CodeBridge turns GitHub issues, PR conversation comments, PR review comments, and discussion comments into a control plane for a local coding agent.
+CodeBridge turns GitHub issues, PR conversation comments, PR review comments, and discussion comments into a control plane for local coding agents.
 
-Assign or mention your GitHub App bot, and CodeBridge runs the configured agent backend against the mapped local repo, then posts progress, summaries, and PR links back to the same thread.
+Assign or mention one of your GitHub App bots, and CodeBridge runs the configured agent backend against the mapped local repo, then posts progress, summaries, and PR links back to the same thread.
 
 ## Install
 
@@ -15,6 +15,7 @@ git clone https://github.com/dzianisv/CodeBridge.git && cd CodeBridge && pnpm in
 - Run local agent workflows from GitHub web/mobile instead of a terminal.
 - Keep session state visible in GitHub using labels and comments.
 - Support both webhook and polling ingestion modes.
+- Route different GitHub Apps to different backends against the same repo.
 - Ship a hard-gate eval and protocol matrix against real GitHub surfaces.
 
 ## System Design
@@ -25,7 +26,7 @@ git clone https://github.com/dzianisv/CodeBridge.git && cd CodeBridge && pnpm in
       | Issues / PR comments / Discussions / Assignments / Labels / PRs       |
       +-------------------------------------+----------------------------------+
                                             | events
-                         webhook (/github/webhook) or polling (interval)
+                         webhook (/github/webhook/<appKey>) or polling (interval)
                                             v
 +-------------------------------------------------------------------------------------------+
 |                                         CodeBridge                                        |
@@ -88,9 +89,8 @@ cp config/tenants.example.yaml config/tenants.yaml
 
 Set:
 
-- `secrets.githubAppId`
-- `secrets.githubPrivateKey`
-- tenant `github.installationId`
+- `secrets.githubApps`
+- tenant `github.apps[].installationId`
 - tenant repo mapping in `repos`
 
 You can also place real config in `~/.config/codebridge/config.yaml` and set `CONFIG_PATH`.
@@ -130,15 +130,20 @@ curl http://127.0.0.1:8788/health
 
 ## GitHub App Setup
 
-### 1. Create the GitHub App
+### 1. Create one or more GitHub Apps
 
-Go to **GitHub → Settings → Developer settings → GitHub Apps → New GitHub App** and fill in:
+Go to **GitHub → Settings → Developer settings → GitHub Apps → New GitHub App** and fill in one app per backend route you want to expose. Typical setup:
+
+- `CodexApp` -> backend `codex`
+- `OpenCodeApp` -> backend `opencode`
+
+For each app:
 
 | Field | Value |
 |-------|-------|
 | App name | `CodeBridge` (or your preferred name) |
 | Homepage URL | `https://github.com/dzianisv/CodeBridge` |
-| Webhook URL | `https://<your-host>:8788/github/webhook` (or leave blank if polling-only) |
+| Webhook URL | `https://<your-host>:8788/github/webhook/<appKey>` (or leave blank if polling-only) |
 | Webhook secret | Generate one with `openssl rand -hex 32` |
 
 #### Permissions
@@ -163,9 +168,9 @@ Click **Create GitHub App**. Note the **App ID** shown on the next page.
 
 On the App settings page, scroll to **Private keys → Generate a private key**. Save the downloaded `.pem` file.
 
-### 3. Install the App on your repository
+### 3. Install each App on your repository
 
-Go to your App's page → **Install App** → select your org/account → choose the repositories. After installing, note the **Installation ID** from the URL:
+Go to each App's page → **Install App** → select your org/account → choose the repositories. After installing, note the **Installation ID** from the URL:
 
 ```
 https://github.com/settings/installations/12345678
@@ -178,25 +183,40 @@ Edit `config/tenants.yaml`:
 
 ```yaml
 secrets:
-  githubAppId: 123456                      # your App ID
-  githubPrivateKey: "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
-  githubWebhookSecret: "your-webhook-secret"  # required for webhook mode
+  githubApps:
+    codex:
+      appId: 123456
+      privateKey: "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
+      webhookSecret: "your-codex-webhook-secret"
+      commandPrefixes:
+        - "CodexApp"
+    opencode:
+      appId: 234567
+      privateKey: "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
+      webhookSecret: "your-opencode-webhook-secret"
+      commandPrefixes:
+        - "OpenCodeApp"
 
 tenants:
   - id: local
     name: My Workspace
     github:
-      installationId: 12345678             # from step 3
-      # assignmentAssignees:               # optional — enable assignment bootstrap
-      #   - "your-bot-login"
+      apps:
+        - appKey: "codex"
+          installationId: 12345678         # CodexApp installation id
+        - appKey: "opencode"
+          installationId: 23456789         # OpenCodeApp installation id
     repos:
       - fullName: "your-org/your-repo"
         path: "/absolute/path/to/local/clone"
-        backend: "codex"                  # optional; defaults to codex
-        # backend: "opencode"
-        # agent: "build"                  # backend-specific; currently used by OpenCode
+        backend: "codex"                  # default backend when no app-specific override exists
         model: "gpt-5.2-codex"
-        # model: "openai/gpt-5"           # OpenCode expects provider/model
+        githubApps:
+          opencode:
+            backend: "opencode"
+            agent: "build"
+            model: "openai/gpt-5"
+            branchPrefix: "opencode"
         baseBranch: "main"
         branchPrefix: "codex"
     defaultRepo: "your-org/your-repo"
@@ -204,7 +224,9 @@ tenants:
 
 The private key accepts PEM with escaped newlines or base64-encoded PEM.
 
-Alternatively, use environment variables instead of the config file:
+Legacy single-app config still works and is normalized into a `default` app key automatically.
+
+Alternatively, use environment variables instead of the config file for a single default app:
 
 ```bash
 export GITHUB_APP_ID=123456
@@ -223,7 +245,7 @@ export GITHUB_POLL_BACKFILL=false
 
 **Webhook (requires public URL):**
 
-Set the webhook URL on your GitHub App to `https://<your-host>/github/webhook`. The webhook secret is required for signature verification.
+Set each webhook URL on its corresponding GitHub App to `https://<your-host>/github/webhook/<appKey>`. The webhook secret is required for signature verification.
 
 Both modes can run simultaneously.
 
@@ -233,7 +255,7 @@ GitHub-originated runs are mapped from GitHub metadata, not from the shell's cur
 
 For webhook and polling events, CodeBridge resolves the target local checkout in this order:
 
-1. GitHub App installation id -> tenant
+1. GitHub App key + installation id -> tenant app binding
 2. GitHub `owner/repo` full name -> repo entry inside that tenant
 3. optional `tenant:<id>` hint in the comment, but only if that tenant is valid for the same installation and the same GitHub repo
 
@@ -243,9 +265,11 @@ The actual local execution path comes from the matched tenant repo entry:
 tenants:
   - id: local
     github:
-      installationId: 113944796
-      repoAllowlist:
-        - dzianisv/codebridge-test
+      apps:
+        - appKey: codex
+          installationId: 113944796
+          repoAllowlist:
+            - dzianisv/codebridge-test
     repos:
       - fullName: dzianisv/codebridge-test
         path: /absolute/path/to/local/checkout
@@ -261,7 +285,7 @@ Important behavior:
 
 ## Backend Selection
 
-Each configured repo can select its execution backend. If `backend` is omitted, CodeBridge defaults to `codex`.
+Each configured repo can select its default execution backend. If `backend` is omitted, CodeBridge defaults to `codex`. A repo can also override backend/agent/model per GitHub App key.
 
 ```yaml
 secrets:
@@ -278,21 +302,39 @@ integrations:
 tenants:
   - id: local
     name: Local
+    github:
+      apps:
+        - appKey: codex
+          installationId: 111111
+        - appKey: opencode
+          installationId: 222222
     repos:
       - fullName: "owner/repo"
         path: "/absolute/path/to/local/checkout"
-        backend: "opencode"
-        agent: "build"
-        model: "openai/gpt-5"
-        branchPrefix: "opencode"
+        backend: "codex"
+        model: "gpt-5.2-codex"
+        githubApps:
+          opencode:
+            backend: "opencode"
+            agent: "build"
+            model: "openai/gpt-5"
+            branchPrefix: "opencode"
 ```
 
 Important behavior:
 
 - `backend` currently supports `codex` and `opencode`.
 - `agent` is backend-specific metadata and is currently forwarded to OpenCode session creation.
+- `githubApps.<appKey>` on a repo only overrides fields that differ from the repo default route.
 - OpenCode model values must use `provider/model` format.
 - `integrations.opencode.*` can come from config or `OPENCODE_*` environment variables.
+
+## Multi-App Routing
+
+- Each run persists `github.appKey`, so outbound comments, labels, and PRs are written by the same app that ingested the command.
+- Managed issue/PR follow-ups are owned by the latest app-bound run on that thread.
+- Explicitly mentioning a different app on the same managed thread starts a new run under that app instead of relaying into the old session.
+- Detailed design notes live in [docs/github-multi-app-routing.md](/Users/engineer/workspace/CodeBridge/docs/github-multi-app-routing.md).
 
 ## Execution Model
 
@@ -301,7 +343,7 @@ CodeBridge currently executes against the configured local checkout path. It doe
 Backend behavior:
 
 - `codex`: CodeBridge starts a local Codex SDK thread in `repo.path`.
-- `opencode`: CodeBridge still prepares the git branch locally, then creates an OpenCode session over HTTP and scopes that session to the same `repo.path`.
+- `opencode`: CodeBridge still prepares the git branch locally, then creates an OpenCode session over HTTP and scopes that session to the same `repo.path`. If OpenCode returns a GitHub PR URL after leaving the checkout clean, CodeBridge records that PR as the successful run outcome instead of downgrading the run to `no_changes`.
 
 Before starting a run, the worker:
 
@@ -309,7 +351,7 @@ Before starting a run, the worker:
 2. fetches `origin`,
 3. creates a fresh branch from the remote default branch,
 4. runs the selected backend in that checkout,
-5. commits and pushes from that same checkout.
+5. commits and pushes from that same checkout, unless the backend already completed the PR flow and returned a GitHub PR URL.
 
 That keeps repo mapping deterministic, but it also means one configured checkout is one mutable execution target. If you need stronger isolation or parallelism for the same GitHub repo, provide separate local clones or worktrees as separate configured `repo.path` targets.
 
@@ -327,9 +369,16 @@ Comment in issue/PR/discussion:
 @codexengineer run investigate flaky CI and propose a fix
 ```
 
+If you run multiple apps on the same repo, mention the app you want:
+
+```text
+@CodexApp run fix the failing test
+@OpenCodeApp run refactor this integration using the opencode backend
+```
+
 ### Follow-up
 
-On managed issues and PR conversation threads, plain non-bot comments are treated as follow-up prompts.
+On managed issues and PR conversation threads, plain non-bot comments are treated as follow-up prompts only for the app that owns the latest managed run on that thread.
 
 PR review comments stay explicit:
 

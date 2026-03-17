@@ -74,9 +74,9 @@ export function createPostgresStore(databaseUrl: string): RunStore {
       `INSERT INTO runs (
         id, tenant_id, repo_full_name, repo_path, source_key, status, prompt, backend, agent, model, branch_prefix,
         slack_channel, slack_thread_ts, slack_message_ts, slack_user_id,
-        github_owner, github_repo, github_issue_number, github_comment_id, github_trigger_comment_id,
+        github_app_key, github_owner, github_repo, github_issue_number, github_comment_id, github_trigger_comment_id,
         github_installation_id, github_issue_title, github_issue_body
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
       ON CONFLICT (source_key) DO UPDATE SET updated_at = now()
       RETURNING *`,
       [
@@ -95,6 +95,7 @@ export function createPostgresStore(databaseUrl: string): RunStore {
         input.slack?.threadTs ?? null,
         input.slack?.messageTs ?? null,
         input.slack?.userId ?? null,
+        input.github?.appKey ?? null,
         input.github?.owner ?? null,
         input.github?.repo ?? null,
         input.github?.issueNumber ?? null,
@@ -232,6 +233,7 @@ function toRunRecord(row: any): RunRecord {
       userId: row.slack_user_id ?? undefined
     } : undefined,
     github: row.github_owner && row.github_repo ? {
+      appKey: row.github_app_key ?? undefined,
       owner: row.github_owner,
       repo: row.github_repo,
       issueNumber: row.github_issue_number ?? undefined,
@@ -273,12 +275,12 @@ export function createSqliteStore(databaseUrl: string): RunStore {
     `INSERT INTO runs (
       id, tenant_id, repo_full_name, repo_path, source_key, status, prompt, backend, agent, model, branch_prefix,
       slack_channel, slack_thread_ts, slack_message_ts, slack_user_id,
-      github_owner, github_repo, github_issue_number, github_comment_id, github_trigger_comment_id,
+      github_app_key, github_owner, github_repo, github_issue_number, github_comment_id, github_trigger_comment_id,
       github_installation_id, github_issue_title, github_issue_body
     ) VALUES (
       @id, @tenantId, @repoFullName, @repoPath, @sourceKey, @status, @prompt, @backend, @agent, @model, @branchPrefix,
       @slackChannel, @slackThreadTs, @slackMessageTs, @slackUserId,
-      @githubOwner, @githubRepo, @githubIssueNumber, @githubCommentId, @githubTriggerCommentId,
+      @githubAppKey, @githubOwner, @githubRepo, @githubIssueNumber, @githubCommentId, @githubTriggerCommentId,
       @githubInstallationId, @githubIssueTitle, @githubIssueBody
     )
     ON CONFLICT(source_key) DO UPDATE SET updated_at = CURRENT_TIMESTAMP`
@@ -342,6 +344,7 @@ export function createSqliteStore(databaseUrl: string): RunStore {
       slackThreadTs: input.slack?.threadTs ?? null,
       slackMessageTs: input.slack?.messageTs ?? null,
       slackUserId: input.slack?.userId ?? null,
+      githubAppKey: input.github?.appKey ?? null,
       githubOwner: input.github?.owner ?? null,
       githubRepo: input.github?.repo ?? null,
       githubIssueNumber: input.github?.issueNumber ?? null,
@@ -489,6 +492,7 @@ function toRunRecordSqlite(row: any): RunRecord {
       userId: row.slack_user_id ?? undefined
     } : undefined,
     github: row.github_owner && row.github_repo ? {
+      appKey: row.github_app_key ?? undefined,
       owner: row.github_owner,
       repo: row.github_repo,
       issueNumber: row.github_issue_number ?? undefined,
@@ -516,6 +520,9 @@ function ensureSqliteRunSchemaMigrations(db: Database.Database) {
   }
   if (!columns.some(column => column.name === "agent")) {
     db.exec("ALTER TABLE runs ADD COLUMN agent TEXT")
+  }
+  if (!columns.some(column => column.name === "github_app_key")) {
+    db.exec("ALTER TABLE runs ADD COLUMN github_app_key TEXT")
   }
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS runs_source_key_idx ON runs(source_key)")
 }

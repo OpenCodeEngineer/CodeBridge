@@ -1,30 +1,37 @@
 import type { AppConfig, RepoConfig, TenantConfig } from "./types.js"
 import type { RunStore } from "./storage.js"
 import type { RunService } from "./run-service.js"
-import { createInstallationClient, formatPrivateKey } from "./github-auth.js"
+import type { InstallationClient } from "./github-auth.js"
 import type { CommandType } from "./commands.js"
 import {
-  buildAssigneeMentionPrefixes,
-  mergeGithubCommandPrefixes,
+  buildGithubCommandPrefixes,
   resolveDefaultGithubCommandPrefixes,
   resolveGithubAppIdentity
 } from "./command-prefixes.js"
 import { routeDiscussionCommentCommand, routeExplicitGitHubCommand, routeIssueCommentCommand } from "./github-routing.js"
 import { postControlAck, postDiscussionUnsupportedControl, postIssueStatus } from "./github-controls.js"
-import { ensureRepoPath } from "./repo.js"
+import { ensureRepoPath, resolveRepo } from "./repo.js"
 import { logger } from "./logger.js"
 import { dispatchSessionRelay, resolveSessionIdFromIssue } from "./codex-session-relay.js"
+import {
+  buildGithubPollStateKey,
+  createGitHubInstallationClientFactory,
+  getTenantGithubAppBinding,
+  hasGithubAppCredentials,
+  listGithubApps,
+  runUsesGithubApp,
+  type GitHubAppMap
+} from "./github-apps.js"
 
 export type GitHubPollEnv = {
-  githubAppId?: number
-  githubPrivateKey?: string
+  githubApps?: GitHubAppMap
   githubPollIntervalSec: number
   githubPollBackfill: boolean
   codexPath?: string
   codexTurnTimeoutMs: number
 }
 
-type GitHubClient = Awaited<ReturnType<typeof createInstallationClient>>
+type GitHubClient = InstallationClient
 
 export function startGitHubPolling(params: {
   config: AppConfig
@@ -33,8 +40,9 @@ export function startGitHubPolling(params: {
   env: GitHubPollEnv
 }) {
   const { config, store, runService, env } = params
-  if (!env.githubAppId || !env.githubPrivateKey) {
-    logger.warn("GitHub polling disabled: missing GITHUB_APP_ID or GITHUB_PRIVATE_KEY")
+  const configuredApps = listGithubApps(env.githubApps).filter(({ config: appConfig }) => hasGithubAppCredentials(appConfig))
+  if (configuredApps.length === 0) {
+    logger.warn("GitHub polling disabled: no GitHub apps with credentials are configured")
     return
   }
   if (!Number.isFinite(env.githubPollIntervalSec) || env.githubPollIntervalSec <= 0) {
@@ -44,43 +52,68 @@ export function startGitHubPolling(params: {
   const intervalMs = Math.max(10000, env.githubPollIntervalSec * 1000)
   const repoPollTimeoutMs = 30_000
   const clientTimeoutMs = 15_000
-  logger.info({ intervalSec: env.githubPollIntervalSec }, "GitHub polling enabled")
+  logger.info({
+    intervalSec: env.githubPollIntervalSec,
+    appKeys: configuredApps.map(app => app.key)
+  }, "GitHub polling enabled")
   let running = false
-  const tokenTtlMs = 50 * 60 * 1000
-  const clientCache = new Map<number, { client: GitHubClient; expiresAt: number }>()
-  const defaultPrefixesPromise = resolveDefaultGithubCommandPrefixes(env)
-  const appIdentityPromise = resolveGithubAppIdentity(env)
+  const getClient = createGitHubInstallationClientFactory(env.githubApps ?? {})
+  const appRuntimes = configuredApps.map(({ key, config: appConfig }) => ({
+    appKey: key,
+    configuredPrefixes: appConfig.commandPrefixes,
+    defaultPrefixesPromise: resolveDefaultGithubCommandPrefixes({
+      githubAppId: appConfig.appId,
+      githubPrivateKey: appConfig.privateKey
+    }),
+    appIdentityPromise: resolveGithubAppIdentity({
+      githubAppId: appConfig.appId,
+      githubPrivateKey: appConfig.privateKey
+    })
+  }))
 
   const tick = async () => {
     if (running) return
     running = true
     try {
-      for (const tenant of config.tenants) {
-        if (!tenant.github?.installationId) continue
-        const installationId = tenant.github.installationId
-        const client = await withTimeout(
-          getClient(installationId),
-          clientTimeoutMs,
-          `GitHub installation client bootstrap timed out for installation ${installationId}`
-        ).catch(error => {
-          logger.warn({ err: error, tenantId: tenant.id, installationId }, "Skipping tenant: GitHub client unavailable")
-          return null
-        })
-        if (!client) continue
+      for (const appRuntime of appRuntimes) {
+        for (const tenant of config.tenants) {
+          const githubBinding = getTenantGithubAppBinding(tenant, appRuntime.appKey)
+          const installationId = githubBinding?.installationId
+          if (!installationId) continue
 
-        for (const repo of tenant.repos) {
-          try {
-            await withTimeout(
-              pollRepo(tenant, repo, client),
-              repoPollTimeoutMs,
-              `GitHub polling timed out for ${repo.fullName}`
-            )
-          } catch (error) {
+          const client = await withTimeout(
+            getClient(appRuntime.appKey, installationId),
+            clientTimeoutMs,
+            `GitHub installation client bootstrap timed out for app ${appRuntime.appKey} installation ${installationId}`
+          ).catch(error => {
             logger.warn({
               err: error,
               tenantId: tenant.id,
-              repoFullName: repo.fullName
-            }, "Skipping repo after polling timeout/failure")
+              appKey: appRuntime.appKey,
+              installationId
+            }, "Skipping tenant app binding: GitHub client unavailable")
+            return null
+          })
+          if (!client) continue
+
+          for (const tenantRepo of tenant.repos) {
+            const repo = resolveRepo(tenant, tenantRepo.fullName, appRuntime.appKey)
+            if (!repo) continue
+
+            try {
+              await withTimeout(
+                pollRepo(tenant, repo, githubBinding, appRuntime, client),
+                repoPollTimeoutMs,
+                `GitHub polling timed out for ${repo.fullName} (${appRuntime.appKey})`
+              )
+            } catch (error) {
+              logger.warn({
+                err: error,
+                tenantId: tenant.id,
+                repoFullName: repo.fullName,
+                appKey: appRuntime.appKey
+              }, "Skipping repo after polling timeout/failure")
+            }
           }
         }
       }
@@ -91,27 +124,28 @@ export function startGitHubPolling(params: {
     }
   }
 
-  const getClient = async (installationId: number): Promise<GitHubClient | null> => {
-    const cached = clientCache.get(installationId)
-    if (cached && cached.expiresAt > Date.now()) return cached.client
-    const client = await createInstallationClient({
-      appId: env.githubAppId!,
-      privateKey: formatPrivateKey(env.githubPrivateKey!),
-      installationId
-    })
-    clientCache.set(installationId, { client, expiresAt: Date.now() + tokenTtlMs })
-    return client
-  }
-
-  const pollRepo = async (tenant: TenantConfig, repo: RepoConfig, client: GitHubClient) => {
+  const pollRepo = async (
+    tenant: TenantConfig,
+    repo: RepoConfig,
+    githubBinding: NonNullable<TenantConfig["github"]>["apps"][number],
+    appRuntime: {
+      appKey: string
+      configuredPrefixes?: string[]
+      defaultPrefixesPromise: Promise<string[]>
+      appIdentityPromise: Promise<{ slug?: string; botLogin?: string } | null>
+    },
+    client: GitHubClient
+  ) => {
     const repoFullName = repo.fullName
-    const allowlist = tenant.github?.repoAllowlist
+    const allowlist = githubBinding.repoAllowlist
     if (allowlist && !allowlist.some(r => r.toLowerCase() === repoFullName.toLowerCase())) return
 
     const [owner, repoName] = repoFullName.split("/")
     if (!owner || !repoName) return
 
     await pollAssignedIssues({
+      appKey: appRuntime.appKey,
+      githubBinding,
       tenant,
       repo,
       owner,
@@ -119,10 +153,13 @@ export function startGitHubPolling(params: {
       client,
       store,
       runService,
-      appIdentityPromise
+      appIdentityPromise: appRuntime.appIdentityPromise
     })
 
     await pollDiscussionComments({
+      appKey: appRuntime.appKey,
+      configuredPrefixes: appRuntime.configuredPrefixes,
+      githubBinding,
       tenant,
       repo,
       owner,
@@ -130,12 +167,15 @@ export function startGitHubPolling(params: {
       client,
       store,
       runService,
-      defaultPrefixesPromise,
-      appIdentityPromise,
+      defaultPrefixesPromise: appRuntime.defaultPrefixesPromise,
+      appIdentityPromise: appRuntime.appIdentityPromise,
       githubPollBackfill: env.githubPollBackfill
     })
 
     await pollPullRequestReviewComments({
+      appKey: appRuntime.appKey,
+      configuredPrefixes: appRuntime.configuredPrefixes,
+      githubBinding,
       config,
       tenant,
       repo,
@@ -144,13 +184,18 @@ export function startGitHubPolling(params: {
       client,
       store,
       runService,
-      defaultPrefixesPromise,
-      appIdentityPromise,
+      defaultPrefixesPromise: appRuntime.defaultPrefixesPromise,
+      appIdentityPromise: appRuntime.appIdentityPromise,
       githubPollBackfill: env.githubPollBackfill,
       env
     })
 
-    const state = await store.getGithubPollState(tenant.id, repoFullName)
+    const pollStateKey = buildGithubPollStateKey({
+      repoFullName,
+      appKey: appRuntime.appKey,
+      scope: "comments"
+    })
+    const state = await store.getGithubPollState(tenant.id, pollStateKey)
     const response = await client.octokit.issues.listCommentsForRepo({
       owner,
       repo: repoName,
@@ -167,7 +212,7 @@ export function startGitHubPolling(params: {
     if (!state && !env.githubPollBackfill) {
       await store.updateGithubPollState({
         tenantId: tenant.id,
-        repoFullName,
+        repoFullName: pollStateKey,
         lastCommentId: newestId,
         lastCommentCreatedAt: newestCreatedAt
       })
@@ -179,7 +224,7 @@ export function startGitHubPolling(params: {
       .filter(comment => typeof comment.id === "number" && comment.id > lastId)
       .sort((a, b) => a.id - b.id)
     const defaultPrefixes = pending.length > 0
-      ? await resolveDefaultPrefixesWithTimeout(defaultPrefixesPromise)
+      ? await resolveDefaultPrefixesWithTimeout(appRuntime.defaultPrefixesPromise)
       : []
     const issueMetaByNumber = new Map<number, { title: string; body?: string; managed: boolean }>()
     const issueSessionByNumber = new Map<number, string | null>()
@@ -239,38 +284,11 @@ export function startGitHubPolling(params: {
         if (!issueNumber) continue
 
         const issueMeta = await getIssueMeta(issueNumber)
-        if (issueMeta.managed) {
-          const sessionId = await getIssueSessionId(issueNumber, issueMeta.body)
-          if (sessionId) {
-            const relay = dispatchSessionRelay({
-              sessionId,
-              owner,
-              repo: repoName,
-              issueNumber,
-              commentId: comment.id,
-              commentBody: comment.body,
-              authorLogin: comment.user?.login ?? undefined,
-              repoPath: await getRepoPath(),
-              codexPath: env.codexPath,
-              codexTurnTimeoutMs: env.codexTurnTimeoutMs,
-              postIssueComment: async (body) => {
-                await client.octokit.issues.createComment({
-                  owner,
-                  repo: repoName,
-                  issue_number: issueNumber,
-                  body
-                })
-              }
-            })
-            if (relay.accepted) continue
-          }
-        }
-
-        const assigneePrefixes = buildAssigneeMentionPrefixes(tenant.github?.assignmentAssignees)
-        const prefixes = mergeGithubCommandPrefixes(
-          assigneePrefixes,
+        const prefixes = buildGithubCommandPrefixes({
+          configured: [...(appRuntime.configuredPrefixes ?? []), ...(githubBinding.commandPrefixes ?? [])],
+          assignmentAssignees: githubBinding.assignmentAssignees,
           defaultPrefixes
-        )
+        })
         const command = routeIssueCommentCommand({
           body: comment.body,
           prefixes,
@@ -278,12 +296,23 @@ export function startGitHubPolling(params: {
         })
         if (!command) continue
 
+        const managedIssueOwnedByApp = issueMeta.managed
+          ? await isManagedIssueOwnedByApp({
+            store,
+            tenantId: tenant.id,
+            repoFullName: repo.fullName,
+            issueNumber,
+            appKey: appRuntime.appKey
+          })
+          : false
+        if (issueMeta.managed && !command.explicit && !managedIssueOwnedByApp) continue
+
         if (command.tenantHint) {
           const hintLower = command.tenantHint.toLowerCase()
           const tenantMatches = hintLower === tenant.id.toLowerCase()
 
           if (!tenantMatches) {
-            const allGithubTenants = config.tenants.filter(t => t.github)
+            const allGithubTenants = config.tenants.filter(t => getTenantGithubAppBinding(t, appRuntime.appKey))
             const validTenantIds = allGithubTenants.map(t => t.id)
             const isValidHint = allGithubTenants.some(t => t.id.toLowerCase() === hintLower)
 
@@ -298,7 +327,7 @@ export function startGitHubPolling(params: {
                 issue_number: issueNumber,
                 body: `❌ **Tenant Resolution Failed**
 
-Tenant \`${command.tenantHint}\` not found or not configured for GitHub.
+Tenant \`${command.tenantHint}\` not found or not configured for GitHub App \`${appRuntime.appKey}\`.
 
 **Valid tenant IDs for this repository:**
 ${tenantList}
@@ -334,8 +363,36 @@ To specify a tenant, use: \`@tenant-id your command here\``
           continue
         }
 
+        if (managedIssueOwnedByApp && command.type === "reply") {
+          const sessionId = await getIssueSessionId(issueNumber, issueMeta.body)
+          if (sessionId) {
+            const relay = dispatchSessionRelay({
+              sessionId,
+              owner,
+              repo: repoName,
+              issueNumber,
+              commentId: comment.id,
+              commentBody: comment.body,
+              authorLogin: comment.user?.login ?? undefined,
+              repoPath: await getRepoPath(),
+              codexPath: env.codexPath,
+              codexTurnTimeoutMs: env.codexTurnTimeoutMs,
+              postIssueComment: async (body) => {
+                await client.octokit.issues.createComment({
+                  owner,
+                  repo: repoName,
+                  issue_number: issueNumber,
+                  body
+                })
+              }
+            })
+            if (relay.accepted) continue
+          }
+        }
+
         const sourceKey = buildSourceKey({
-          installationId: tenant.github?.installationId,
+          appKey: appRuntime.appKey,
+          installationId: githubBinding.installationId,
           repoFullName,
           issueNumber,
           commentId: comment.id,
@@ -361,10 +418,11 @@ To specify a tenant, use: \`@tenant-id your command here\``
           model: repo.model,
           branchPrefix: repo.branchPrefix,
           github: {
+            appKey: appRuntime.appKey,
             owner,
             repo: repoName,
             issueNumber,
-            installationId: tenant.github?.installationId,
+            installationId: githubBinding.installationId,
             issueTitle: issue.title,
             issueBody: issue.body,
             triggerCommentId: comment.id
@@ -377,7 +435,7 @@ To specify a tenant, use: \`@tenant-id your command here\``
 
     await store.updateGithubPollState({
       tenantId: tenant.id,
-      repoFullName,
+      repoFullName: pollStateKey,
       lastCommentId: newestId ?? (state?.lastCommentId ?? null),
       lastCommentCreatedAt: newestCreatedAt ?? null
     })
@@ -406,6 +464,8 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: s
 }
 
 async function pollAssignedIssues(input: {
+  appKey: string
+  githubBinding: NonNullable<TenantConfig["github"]>["apps"][number]
   tenant: TenantConfig
   repo: RepoConfig
   owner: string
@@ -416,7 +476,7 @@ async function pollAssignedIssues(input: {
   appIdentityPromise: Promise<{ slug?: string; botLogin?: string } | null>
 }): Promise<void> {
   const appIdentity = await resolveAppIdentityWithTimeout(input.appIdentityPromise)
-  const assignees = resolveAssignmentAssignees(input.tenant.github?.assignmentAssignees, appIdentity?.botLogin)
+  const assignees = resolveAssignmentAssignees(input.githubBinding.assignmentAssignees, appIdentity?.botLogin)
   if (assignees.length === 0) return
 
   const assigneeSet = new Set(assignees.map(value => value.toLowerCase()))
@@ -469,7 +529,8 @@ async function pollAssignedIssues(input: {
 
     const sourceKey = [
       "github-assigned",
-      input.tenant.github?.installationId ?? "none",
+      input.appKey,
+      input.githubBinding.installationId ?? "none",
       input.repo.fullName.toLowerCase(),
       issue.number
     ].join(":")
@@ -489,10 +550,11 @@ async function pollAssignedIssues(input: {
       model: input.repo.model,
       branchPrefix: input.repo.branchPrefix,
       github: {
+        appKey: input.appKey,
         owner: input.owner,
         repo: input.repoName,
         issueNumber: issue.number,
-        installationId: input.tenant.github?.installationId,
+        installationId: input.githubBinding.installationId,
         issueTitle: issue.title,
         issueBody: issue.body ?? undefined
       }
@@ -501,6 +563,9 @@ async function pollAssignedIssues(input: {
 }
 
 async function pollDiscussionComments(input: {
+  appKey: string
+  configuredPrefixes?: string[]
+  githubBinding: NonNullable<TenantConfig["github"]>["apps"][number]
   tenant: TenantConfig
   repo: RepoConfig
   owner: string
@@ -512,7 +577,11 @@ async function pollDiscussionComments(input: {
   appIdentityPromise: Promise<{ slug?: string; botLogin?: string } | null>
   githubPollBackfill: boolean
 }): Promise<void> {
-  const discussionPollKey = `${input.repo.fullName}#discussion`
+  const discussionPollKey = buildGithubPollStateKey({
+    repoFullName: input.repo.fullName,
+    appKey: input.appKey,
+    scope: "discussion"
+  })
   const state = await input.store.getGithubPollState(input.tenant.id, discussionPollKey)
   const appIdentity = await resolveAppIdentityWithTimeout(input.appIdentityPromise)
 
@@ -631,11 +700,11 @@ async function pollDiscussionComments(input: {
         continue
       }
 
-      const assigneePrefixes = buildAssigneeMentionPrefixes(input.tenant.github?.assignmentAssignees)
-      const prefixes = mergeGithubCommandPrefixes(
-        assigneePrefixes,
+      const prefixes = buildGithubCommandPrefixes({
+        configured: [...(input.configuredPrefixes ?? []), ...(input.githubBinding.commandPrefixes ?? [])],
+        assignmentAssignees: input.githubBinding.assignmentAssignees,
         defaultPrefixes
-      )
+      })
       const command = routeDiscussionCommentCommand({
         body: comment.body,
         prefixes
@@ -655,7 +724,8 @@ async function pollDiscussionComments(input: {
 
       const sourceKey = [
         "github-discussion",
-        input.tenant.github?.installationId ?? "none",
+        input.appKey,
+        input.githubBinding.installationId ?? "none",
         input.repo.fullName.toLowerCase(),
         comment.discussionNumber,
         comment.commentId,
@@ -681,10 +751,11 @@ async function pollDiscussionComments(input: {
         model: input.repo.model,
         branchPrefix: input.repo.branchPrefix,
         github: {
+          appKey: input.appKey,
           owner: input.owner,
           repo: input.repoName,
           issueNumber: comment.discussionNumber,
-          installationId: input.tenant.github?.installationId,
+          installationId: input.githubBinding.installationId,
           issueTitle: comment.discussionTitle,
           issueBody: comment.discussionBody
         }
@@ -709,6 +780,9 @@ async function pollDiscussionComments(input: {
 }
 
 async function pollPullRequestReviewComments(input: {
+  appKey: string
+  configuredPrefixes?: string[]
+  githubBinding: NonNullable<TenantConfig["github"]>["apps"][number]
   config: AppConfig
   tenant: TenantConfig
   repo: RepoConfig
@@ -722,7 +796,11 @@ async function pollPullRequestReviewComments(input: {
   githubPollBackfill: boolean
   env: GitHubPollEnv
 }): Promise<void> {
-  const reviewPollKey = `${input.repo.fullName}#pr-review`
+  const reviewPollKey = buildGithubPollStateKey({
+    repoFullName: input.repo.fullName,
+    appKey: input.appKey,
+    scope: "pr-review"
+  })
   const state = await input.store.getGithubPollState(input.tenant.id, reviewPollKey)
   const appIdentity = await resolveAppIdentityWithTimeout(input.appIdentityPromise)
 
@@ -846,23 +924,33 @@ async function pollPullRequestReviewComments(input: {
       if (!issueNumber) continue
 
       const issueMeta = await getIssueMeta(issueNumber)
-      const assigneePrefixes = buildAssigneeMentionPrefixes(input.tenant.github?.assignmentAssignees)
-      const prefixes = mergeGithubCommandPrefixes(
-        assigneePrefixes,
+      const prefixes = buildGithubCommandPrefixes({
+        configured: [...(input.configuredPrefixes ?? []), ...(input.githubBinding.commandPrefixes ?? [])],
+        assignmentAssignees: input.githubBinding.assignmentAssignees,
         defaultPrefixes
-      )
+      })
       const command = routeExplicitGitHubCommand({
         body,
         prefixes
       })
       if (!command) continue
 
+      const managedIssueOwnedByApp = issueMeta.managed
+        ? await isManagedIssueOwnedByApp({
+          store: input.store,
+          tenantId: input.tenant.id,
+          repoFullName: input.repo.fullName,
+          issueNumber,
+          appKey: input.appKey
+        })
+        : false
+
       if (command.tenantHint) {
         const hintLower = command.tenantHint.toLowerCase()
         const tenantMatches = hintLower === input.tenant.id.toLowerCase()
 
         if (!tenantMatches) {
-          const allGithubTenants = input.config.tenants.filter(tenant => tenant.github)
+          const allGithubTenants = input.config.tenants.filter(tenant => getTenantGithubAppBinding(tenant, input.appKey))
           const validTenantIds = allGithubTenants.map(tenant => tenant.id)
           const isValidHint = allGithubTenants.some(tenant => tenant.id.toLowerCase() === hintLower)
 
@@ -877,7 +965,7 @@ async function pollPullRequestReviewComments(input: {
               issue_number: issueNumber,
               body: `❌ **Tenant Resolution Failed**
 
-Tenant \`${command.tenantHint}\` not found or not configured for GitHub.
+Tenant \`${command.tenantHint}\` not found or not configured for GitHub App \`${input.appKey}\`.
 
 **Valid tenant IDs for this repository:**
 ${tenantList}
@@ -913,7 +1001,7 @@ To specify a tenant, use: \`@tenant-id your command here\``
         continue
       }
 
-      if (issueMeta.managed && command.type === "reply") {
+      if (managedIssueOwnedByApp && command.type === "reply") {
         const sessionId = await getIssueSessionId(issueNumber, issueMeta.body)
         if (sessionId) {
           const relay = dispatchSessionRelay({
@@ -941,7 +1029,8 @@ To specify a tenant, use: \`@tenant-id your command here\``
       }
 
       const sourceKey = buildPullRequestReviewSourceKey({
-        installationId: input.tenant.github?.installationId,
+        appKey: input.appKey,
+        installationId: input.githubBinding.installationId,
         repoFullName: input.repo.fullName,
         issueNumber,
         commentId: comment.id,
@@ -965,10 +1054,11 @@ To specify a tenant, use: \`@tenant-id your command here\``
         model: input.repo.model,
         branchPrefix: input.repo.branchPrefix,
         github: {
+          appKey: input.appKey,
           owner: input.owner,
           repo: input.repoName,
           issueNumber,
-          installationId: input.tenant.github?.installationId,
+          installationId: input.githubBinding.installationId,
           issueTitle: issueMeta.title,
           issueBody: issueMeta.body,
           triggerCommentId: comment.id
@@ -1080,6 +1170,21 @@ function parsePullRequestNumber(pullRequestUrl?: string | null): number | null {
   return parseInt(match[1], 10)
 }
 
+async function isManagedIssueOwnedByApp(input: {
+  store: RunStore
+  tenantId: string
+  repoFullName: string
+  issueNumber: number
+  appKey: string
+}): Promise<boolean> {
+  const latest = await input.store.getLatestRunForIssue({
+    tenantId: input.tenantId,
+    repoFullName: input.repoFullName,
+    issueNumber: input.issueNumber
+  })
+  return runUsesGithubApp(latest, input.appKey)
+}
+
 function buildReplyPrompt(issueNumber: number, prompt: string): string {
   return [
     `Follow-up command from GitHub issue #${issueNumber}:`,
@@ -1105,6 +1210,7 @@ function buildIssueBootstrapPrompt(issueNumber: number, title: string, body?: st
 }
 
 function buildSourceKey(input: {
+  appKey: string
   installationId?: number
   repoFullName: string
   issueNumber: number
@@ -1113,6 +1219,7 @@ function buildSourceKey(input: {
 }): string {
   return [
     "github",
+    input.appKey,
     input.installationId ?? "none",
     input.repoFullName.toLowerCase(),
     input.issueNumber,
@@ -1122,6 +1229,7 @@ function buildSourceKey(input: {
 }
 
 function buildPullRequestReviewSourceKey(input: {
+  appKey: string
   installationId?: number
   repoFullName: string
   issueNumber: number
@@ -1130,6 +1238,7 @@ function buildPullRequestReviewSourceKey(input: {
 }): string {
   return [
     "github-review",
+    input.appKey,
     input.installationId ?? "none",
     input.repoFullName.toLowerCase(),
     input.issueNumber,

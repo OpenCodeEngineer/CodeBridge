@@ -26,6 +26,7 @@ type VibeAgentsDispatchPayload = {
     createdAt: string
     updatedAt: string
     github?: {
+      appKey?: string
       owner: string
       repo: string
       issueNumber?: number
@@ -148,6 +149,7 @@ function buildPayload(input: {
       createdAt: run.createdAt,
       updatedAt: run.updatedAt,
       github: run.github ? {
+        appKey: run.github.appKey,
         owner: run.github.owner,
         repo: run.github.repo,
         issueNumber: run.github.issueNumber,

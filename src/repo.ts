@@ -2,6 +2,10 @@ import path from "node:path"
 import { access } from "node:fs/promises"
 import { execa } from "execa"
 import type { AppConfig, RepoConfig, TenantConfig } from "./types.js"
+import {
+  findTenantByGithubInstallation as findTenantByGithubInstallationByApp,
+  resolveRepoForGithubApp
+} from "./github-apps.js"
 
 export type TenantRepoMatch = {
   tenant: TenantConfig
@@ -12,9 +16,12 @@ export function findTenantBySlackTeam(config: AppConfig, teamId: string): Tenant
   return config.tenants.find(t => t.slack?.teamId === teamId) ?? null
 }
 
-export function findTenantByGithubInstallation(config: AppConfig, installationId: number | undefined): TenantConfig | null {
-  if (!installationId) return null
-  return config.tenants.find(t => t.github?.installationId === installationId) ?? null
+export function findTenantByGithubInstallation(
+  config: AppConfig,
+  installationId: number | undefined,
+  appKey?: string
+): TenantConfig | null {
+  return findTenantByGithubInstallationByApp(config, installationId, appKey)
 }
 
 export function findTenantByRepoFullName(config: AppConfig, fullName: string): TenantConfig | null {
@@ -69,16 +76,16 @@ export async function findTenantRepoByGitRemote(config: AppConfig, cwd: string):
   return null
 }
 
-export function resolveRepo(tenant: TenantConfig, repoHint?: string): RepoConfig | null {
+export function resolveRepo(tenant: TenantConfig, repoHint?: string, appKey?: string): RepoConfig | null {
   if (repoHint) {
     const match = tenant.repos.find(r => r.fullName.toLowerCase() === repoHint.toLowerCase())
-    if (match) return match
+    if (match) return resolveRepoForGithubApp(match, appKey)
   }
   if (tenant.defaultRepo) {
     const match = tenant.repos.find(r => r.fullName.toLowerCase() === tenant.defaultRepo?.toLowerCase())
-    if (match) return match
+    if (match) return resolveRepoForGithubApp(match, appKey)
   }
-  return tenant.repos[0] ?? null
+  return tenant.repos[0] ? resolveRepoForGithubApp(tenant.repos[0], appKey) : null
 }
 
 export async function ensureRepoPath(repo: RepoConfig): Promise<string> {

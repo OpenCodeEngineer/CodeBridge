@@ -72,6 +72,19 @@ export function buildAssigneeMentionPrefixes(assignees: string[] | undefined): s
   return [...values]
 }
 
+export function buildGithubCommandPrefixes(input: {
+  configured?: string[]
+  assignmentAssignees?: string[]
+  defaultPrefixes?: string[]
+}): string[] {
+  const configured = filterGithubMentionPrefixes(input.configured)
+  const assigneePrefixes = buildAssigneeMentionPrefixes(input.assignmentAssignees)
+  return mergeGithubCommandPrefixes(
+    [...configured, ...assigneePrefixes],
+    input.defaultPrefixes ?? []
+  )
+}
+
 function buildDefaultGithubCommandPrefixes(identity?: GitHubAppIdentity): string[] {
   const values = new Set<string>()
   if (!identity) return [...values]

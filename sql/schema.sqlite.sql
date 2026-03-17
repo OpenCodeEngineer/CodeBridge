@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS runs (
   slack_thread_ts TEXT,
   slack_message_ts TEXT,
   slack_user_id TEXT,
+  github_app_key TEXT,
   github_owner TEXT,
   github_repo TEXT,
   github_issue_number INTEGER,

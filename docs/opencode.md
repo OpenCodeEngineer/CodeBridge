@@ -11,9 +11,11 @@ Codex remains the default when `repos[].backend` is omitted.
 
 ## Design Decision
 
-CodeBridge keeps ownership of GitHub routing, local repo selection, branch creation, commits, pushes, and PR creation.
+CodeBridge keeps ownership of GitHub routing, tenant/repo resolution, status posting, and local branch preparation.
 
-OpenCode is used only as the agent execution backend.
+OpenCode is used as the execution backend over HTTP.
+
+CodeBridge still prefers to own commit/push/PR creation when the checkout is dirty after the backend finishes. However, live validation showed that OpenCode can sometimes finish the git/PR flow itself and return a GitHub PR URL while leaving the checkout clean. The runner now treats that returned PR URL as authoritative success instead of incorrectly marking the run `no_changes`.
 
 That means a GitHub issue assignment or mention is mapped like this:
 
@@ -41,7 +43,8 @@ For a repo configured with `backend: opencode`, the runner does this:
 4. create a fresh branch from the remote default branch
 5. call the OpenCode server using the resolved checkout path
 6. wait for the assistant to finish
-7. commit, push, and open a PR from the same local checkout
+7. if the checkout is dirty, commit, push, and open a PR from the same local checkout
+8. if the checkout is already clean but the assistant response contains a GitHub PR URL, persist that PR URL and mirror it back to the originating GitHub thread as the successful outcome
 
 The current integration does not ask OpenCode to create or manage worktrees. CodeBridge continues to use the configured checkout path directly.
 
@@ -141,8 +144,14 @@ Validated on March 17, 2026:
 - The OpenCode server was healthy and reachable over HTTP.
 - The adapter successfully created a session, delegated a repo mutation, and collected the assistant response.
 - OpenCode can complete a task with tool-only terminal output. CodeBridge now issues a summary follow-up in the same session when that happens so GitHub still gets a human-readable final message.
+- OpenCode can also create and open a PR itself before CodeBridge checks git status. The runner now parses a returned GitHub PR URL and records the run as `succeeded` even when the checkout is already clean.
 - Live runs produced transient untracked artifacts such as `.reflection/`, `.tts/`, and `.tts-debug.log`. CodeBridge now ignores those during dirty checks and unstages them before commit so PRs only include requested changes.
 - Status polling can lag slightly behind the terminal assistant output. The adapter now tolerates status polling failures after a terminal assistant message has already been observed.
+- Customer-flow rerun evidence after the backend-created-PR fix:
+  - issue: `dzianisv/codebridge-test#524`
+  - run id: `ZkkIiFQf`
+  - final status comment: `PR: https://github.com/dzianisv/codebridge-test/pull/525`
+  - resulting PR: `dzianisv/codebridge-test#525`
 
 ## Tradeoffs
 

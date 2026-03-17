@@ -5,9 +5,23 @@ import os from "node:os"
 import { existsSync } from "node:fs"
 import yaml from "js-yaml"
 import { z } from "zod"
-import type { AppConfig } from "./types.js"
+import type {
+  AppConfig,
+  GitHubAppBindingConfig,
+  GitHubAppConfig,
+  GitHubConfig,
+  RepoGitHubAppConfig
+} from "./types.js"
 
 loadDotenv()
+
+const repoGithubAppSchema = z.object({
+  backend: z.enum(["codex", "opencode"]).optional(),
+  agent: z.string().optional(),
+  model: z.string().optional(),
+  baseBranch: z.string().optional(),
+  branchPrefix: z.string().optional()
+})
 
 const repoSchema = z.object({
   fullName: z.string(),
@@ -16,7 +30,8 @@ const repoSchema = z.object({
   agent: z.string().optional(),
   model: z.string().optional(),
   baseBranch: z.string().optional(),
-  branchPrefix: z.string().optional()
+  branchPrefix: z.string().optional(),
+  githubApps: z.record(repoGithubAppSchema).optional()
 })
 
 const slackSchema = z.object({
@@ -24,11 +39,20 @@ const slackSchema = z.object({
   commandPrefixes: z.array(z.string()).min(1)
 })
 
-const githubSchema = z.object({
+const githubAppBindingSchema = z.object({
+  appKey: z.string(),
   installationId: z.number().optional(),
   repoAllowlist: z.array(z.string()).optional(),
   commandPrefixes: z.array(z.string()).optional(),
   assignmentAssignees: z.array(z.string()).optional()
+})
+
+const githubSchema = z.object({
+  installationId: z.number().optional(),
+  repoAllowlist: z.array(z.string()).optional(),
+  commandPrefixes: z.array(z.string()).optional(),
+  assignmentAssignees: z.array(z.string()).optional(),
+  apps: z.array(githubAppBindingSchema).optional()
 })
 
 const tenantSchema = z.object({
@@ -40,7 +64,15 @@ const tenantSchema = z.object({
   defaultRepo: z.string().optional()
 })
 
+const githubAppSchema = z.object({
+  appId: z.number().optional(),
+  privateKey: z.string().optional(),
+  webhookSecret: z.string().optional(),
+  commandPrefixes: z.array(z.string()).optional()
+})
+
 const secretsSchema = z.object({
+  githubApps: z.record(githubAppSchema).optional(),
   githubAppId: z.number().optional(),
   githubPrivateKey: z.string().optional(),
   githubWebhookSecret: z.string().optional(),
@@ -171,7 +203,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     const message = result.error.issues.map(issue => `${issue.path.join(".")} ${issue.message}`).join("; ")
     throw new Error(`Invalid config: ${message}`)
   }
-  return result.data
+  return normalizeConfig(result.data)
 }
 
 function parseBoolean(value: string): boolean {
@@ -203,4 +235,138 @@ function resolveDefaultConfigPath(): string {
   }
 
   return path.join(process.cwd(), "config", "tenants.yaml")
+}
+
+function normalizeConfig(input: z.infer<typeof appSchema>): AppConfig {
+  const secrets = normalizeSecretsConfig(input.secrets)
+
+  return {
+    secrets,
+    integrations: input.integrations,
+    tenants: input.tenants.map(tenant => ({
+      ...tenant,
+      github: normalizeTenantGitHubConfig(tenant.github),
+      repos: tenant.repos.map(repo => ({
+        ...repo,
+        githubApps: normalizeRepoGitHubApps(repo.githubApps)
+      }))
+    }))
+  }
+}
+
+function normalizeSecretsConfig(
+  secrets: z.infer<typeof secretsSchema> | undefined
+): AppConfig["secrets"] {
+  if (!secrets) return undefined
+
+  const githubApps = new Map<string, GitHubAppConfig>()
+  for (const [rawKey, value] of Object.entries(secrets.githubApps ?? {})) {
+    const key = normalizeGithubAppKey(rawKey)
+    if (!key) continue
+    githubApps.set(key, value)
+  }
+
+  const legacyDefault: GitHubAppConfig = {
+    appId: secrets.githubAppId,
+    privateKey: secrets.githubPrivateKey,
+    webhookSecret: secrets.githubWebhookSecret
+  }
+  if (hasGitHubAppConfig(legacyDefault) && !githubApps.has("default")) {
+    githubApps.set("default", legacyDefault)
+  }
+
+  const normalized: NonNullable<AppConfig["secrets"]> = {
+    codexNotifyToken: secrets.codexNotifyToken,
+    vibeAgentsToken: secrets.vibeAgentsToken,
+    opencodePassword: secrets.opencodePassword
+  }
+
+  if (githubApps.size > 0) {
+    normalized.githubApps = Object.fromEntries(githubApps.entries())
+  }
+
+  return hasAnySecretValue(normalized) ? normalized : undefined
+}
+
+function normalizeTenantGitHubConfig(
+  github: z.infer<typeof githubSchema> | undefined
+): GitHubConfig | undefined {
+  if (!github) return undefined
+
+  const apps = new Map<string, GitHubAppBindingConfig>()
+  for (const binding of github.apps ?? []) {
+    const appKey = normalizeGithubAppKey(binding.appKey)
+    if (!appKey) continue
+    apps.set(appKey, {
+      appKey,
+      installationId: binding.installationId,
+      repoAllowlist: binding.repoAllowlist,
+      commandPrefixes: binding.commandPrefixes,
+      assignmentAssignees: binding.assignmentAssignees
+    })
+  }
+
+  const legacyDefault: GitHubAppBindingConfig = {
+    appKey: "default",
+    installationId: github.installationId,
+    repoAllowlist: github.repoAllowlist,
+    commandPrefixes: github.commandPrefixes,
+    assignmentAssignees: github.assignmentAssignees
+  }
+  if (hasGitHubAppBinding(legacyDefault) && !apps.has("default")) {
+    apps.set("default", legacyDefault)
+  }
+
+  if (apps.size === 0) return undefined
+  return { apps: Array.from(apps.values()) }
+}
+
+function normalizeRepoGitHubApps(
+  githubApps: Record<string, z.infer<typeof repoGithubAppSchema>> | undefined
+): Record<string, RepoGitHubAppConfig> | undefined {
+  if (!githubApps) return undefined
+  const normalizedEntries = Object.entries(githubApps)
+    .map(([rawKey, value]) => {
+      const key = normalizeGithubAppKey(rawKey)
+      if (!key) return null
+      return [key, value] as const
+    })
+    .filter((entry): entry is readonly [string, RepoGitHubAppConfig] => Boolean(entry))
+
+  if (normalizedEntries.length === 0) return undefined
+  return Object.fromEntries(normalizedEntries)
+}
+
+function normalizeGithubAppKey(value: string | undefined): string | null {
+  const normalized = value?.trim().toLowerCase()
+  return normalized ? normalized : null
+}
+
+function hasGitHubAppConfig(value: GitHubAppConfig | undefined): boolean {
+  if (!value) return false
+  return Boolean(
+    value.appId ||
+    value.privateKey ||
+    value.webhookSecret ||
+    (value.commandPrefixes && value.commandPrefixes.length > 0)
+  )
+}
+
+function hasGitHubAppBinding(value: GitHubAppBindingConfig | undefined): boolean {
+  if (!value) return false
+  return Boolean(
+    value.installationId ||
+    (value.repoAllowlist && value.repoAllowlist.length > 0) ||
+    (value.commandPrefixes && value.commandPrefixes.length > 0) ||
+    (value.assignmentAssignees && value.assignmentAssignees.length > 0)
+  )
+}
+
+function hasAnySecretValue(value: NonNullable<AppConfig["secrets"]>): boolean {
+  return Boolean(
+    value.githubApps ||
+    value.codexNotifyToken ||
+    value.vibeAgentsToken ||
+    value.opencodePassword
+  )
 }

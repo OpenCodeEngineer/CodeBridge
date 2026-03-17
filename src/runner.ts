@@ -11,14 +11,15 @@ import { ProgressTracker } from "./progress.js"
 import { Throttler } from "./throttle.js"
 import { formatGitHubStatus, formatSlackStatus, formatFinalSummary } from "./status.js"
 import { updateSlackStatus, postSlackStatus } from "./slack.js"
-import { createInstallationClient, formatPrivateKey } from "./github-auth.js"
 import { syncIssueLifecycleState } from "./github-issue-state.js"
 import { isDiscussionSourceKey, postDiscussionCommentFromContext } from "./github-discussions.js"
 import { isDirty, fetchOrigin, createBranch, commitAll, pushBranch, getDefaultBranchFromOrigin } from "./git.js"
 import { logger } from "./logger.js"
 import type { VibeAgentsSink } from "./vibe-agents.js"
+import { createGitHubInstallationClientFactory, type GitHubAppMap } from "./github-apps.js"
 
 const disabledMcpServersCache = new Map<string, Promise<Record<string, { enabled: boolean }>>>()
+const GITHUB_PULL_REQUEST_URL_PATTERN = /https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/(\d+)\/?/i
 
 export type RunnerEnv = {
   codexPath?: string
@@ -30,8 +31,7 @@ export type RunnerEnv = {
   opencodeEnabled?: boolean
   opencodeTimeoutMs?: number
   opencodePollIntervalMs?: number
-  githubAppId?: number
-  githubPrivateKey?: string
+  githubApps?: GitHubAppMap
 }
 
 export function createRunner(params: {
@@ -41,6 +41,7 @@ export function createRunner(params: {
   vibeAgents?: VibeAgentsSink
 }) {
   const { store, slackClient, env, vibeAgents } = params
+  const getGitHubClient = env.githubApps ? createGitHubInstallationClientFactory(env.githubApps) : null
 
   return async (job: { runId: string }) => {
     const run = await store.getRun(job.runId)
@@ -60,7 +61,9 @@ export function createRunner(params: {
     const tracker = new ProgressTracker()
     const throttler = new Throttler(2000)
 
-    const githubClient = await getGitHubClient(run, env)
+    const githubClient = run.github?.installationId && getGitHubClient
+      ? await getGitHubClient(run.github.appKey ?? "default", run.github.installationId)
+      : null
     if (run.github && githubClient && !discussionTarget) {
       await syncIssueLifecycleState(githubClient, run.github, "in-progress")
     }
@@ -123,8 +126,24 @@ export function createRunner(params: {
         env
       })
 
+      const backendCreatedPr = extractPullRequestReference(finalResponse)
       const hasChanges = await isDirty(run.repoPath)
       if (!hasChanges) {
+        if (backendCreatedPr) {
+          await store.updateRunPr(run.id, backendCreatedPr.number, backendCreatedPr.url)
+          await store.updateRunStatus(run.id, "succeeded")
+          void vibeAgents?.sendRunStatus(run, "succeeded", {
+            summary: finalResponse.trim() || "Completed",
+            prUrl: backendCreatedPr.url
+          })
+          if (run.github && githubClient && !discussionTarget) {
+            await syncIssueLifecycleState(githubClient, run.github, "completed")
+          }
+          const message = formatFinalSummary(run, finalResponse || "Completed", backendCreatedPr.url)
+          await finalize(run, "succeeded", message, updateStatus, githubClient, slackClient)
+          return
+        }
+
         await store.updateRunStatus(run.id, "no_changes")
         void vibeAgents?.sendRunStatus(run, "no_changes", {
           summary: finalResponse.trim() || "No changes detected"
@@ -478,15 +497,6 @@ async function finalize(
   }
 }
 
-async function getGitHubClient(run: RunRecord, env: RunnerEnv) {
-  if (!run.github?.installationId || !env.githubAppId || !env.githubPrivateKey) return null
-  return createInstallationClient({
-    appId: env.githubAppId,
-    privateKey: formatPrivateKey(env.githubPrivateKey),
-    installationId: run.github.installationId
-  })
-}
-
 async function resolveDisabledMcpServersConfig(codexPath?: string): Promise<Record<string, { enabled: boolean }>> {
   const key = codexPath ?? "codex"
   let cached = disabledMcpServersCache.get(key)
@@ -526,4 +536,21 @@ function parseMcpServerNames(output: string): string[] {
     names.add(name)
   }
   return [...names]
+}
+
+function extractPullRequestReference(text: string): { url: string; number: number } | null {
+  const match = text.match(GITHUB_PULL_REQUEST_URL_PATTERN)
+  if (!match) return null
+
+  const prNumber = Number.parseInt(match[1] ?? "", 10)
+  if (!Number.isFinite(prNumber)) return null
+
+  return {
+    url: match[0].replace(/\/$/, ""),
+    number: prNumber
+  }
+}
+
+export const _testHelpers = {
+  extractPullRequestReference
 }

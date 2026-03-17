@@ -127,6 +127,7 @@ describe("SQLite store CRUD", () => {
       repoPath: "/tmp/repo",
       prompt: "test",
       github: {
+        appKey: "codex",
         owner: "org",
         repo: "repo",
         issueNumber: 10,
@@ -136,6 +137,7 @@ describe("SQLite store CRUD", () => {
 
     const run = await store.getRun("run-gh")
     expect(run!.github).toBeDefined()
+    expect(run!.github!.appKey).toBe("codex")
     expect(run!.github!.owner).toBe("org")
     expect(run!.github!.repo).toBe("repo")
     expect(run!.github!.issueNumber).toBe(10)

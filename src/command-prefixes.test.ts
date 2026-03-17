@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest"
 import {
+  buildGithubCommandPrefixes,
   mergeGithubCommandPrefixes,
   filterGithubMentionPrefixes,
   buildAssigneeMentionPrefixes
@@ -81,5 +82,19 @@ describe("buildAssigneeMentionPrefixes", () => {
   it("rejects invalid GitHub usernames", () => {
     const result = buildAssigneeMentionPrefixes(["valid-name", "invalid name"])
     expect(result).toEqual(["@valid-name"])
+  })
+})
+
+describe("buildGithubCommandPrefixes", () => {
+  it("combines configured aliases, assignee aliases, and resolved defaults", () => {
+    const result = buildGithubCommandPrefixes({
+      configured: ["CodexApp", "@custom"],
+      assignmentAssignees: ["openai-code-agent"],
+      defaultPrefixes: ["@codexapp"]
+    })
+
+    expect(result).toContain("@codexapp")
+    expect(result).toContain("@custom")
+    expect(result).toContain("@openai-code-agent")
   })
 })

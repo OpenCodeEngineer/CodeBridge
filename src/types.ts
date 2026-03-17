@@ -5,11 +5,23 @@ export type SlackConfig = {
 
 export type AgentBackend = "codex" | "opencode"
 
-export type GitHubConfig = {
+export type GitHubAppConfig = {
+  appId?: number
+  privateKey?: string
+  webhookSecret?: string
+  commandPrefixes?: string[]
+}
+
+export type GitHubAppBindingConfig = {
+  appKey: string
   installationId?: number
   repoAllowlist?: string[]
   commandPrefixes?: string[]
   assignmentAssignees?: string[]
+}
+
+export type GitHubConfig = {
+  apps: GitHubAppBindingConfig[]
 }
 
 export type VibeAgentsIntegrationConfig = {
@@ -35,6 +47,14 @@ export type IntegrationsConfig = {
   opencode?: OpenCodeIntegrationConfig
 }
 
+export type RepoGitHubAppConfig = {
+  backend?: AgentBackend
+  agent?: string
+  model?: string
+  baseBranch?: string
+  branchPrefix?: string
+}
+
 export type RepoConfig = {
   fullName: string
   path: string
@@ -43,6 +63,7 @@ export type RepoConfig = {
   model?: string
   baseBranch?: string
   branchPrefix?: string
+  githubApps?: Record<string, RepoGitHubAppConfig>
 }
 
 export type TenantConfig = {
@@ -55,9 +76,7 @@ export type TenantConfig = {
 }
 
 export type SecretsConfig = {
-  githubAppId?: number
-  githubPrivateKey?: string
-  githubWebhookSecret?: string
+  githubApps?: Record<string, GitHubAppConfig>
   codexNotifyToken?: string
   vibeAgentsToken?: string
   opencodePassword?: string
@@ -77,6 +96,7 @@ export type SlackContext = {
 }
 
 export type GitHubContext = {
+  appKey?: string
   owner: string
   repo: string
   issueNumber?: number

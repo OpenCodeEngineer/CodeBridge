@@ -1,9 +1,19 @@
 # Example values only. Do not commit real secrets to repository config.
 # Prefer putting real values in ~/.config/codebridge/config.yaml.
 secrets:
-  githubAppId: 123456
-  githubPrivateKey: "BASE64_OR_PEM_PRIVATE_KEY"
-  # githubWebhookSecret: "optional-webhook-secret"
+  githubApps:
+    codex:
+      appId: 123456
+      privateKey: "BASE64_OR_PEM_PRIVATE_KEY_FOR_CODEX_APP"
+      webhookSecret: "optional-webhook-secret-for-codex"
+      commandPrefixes:
+        - "CodexApp"
+    opencode:
+      appId: 234567
+      privateKey: "BASE64_OR_PEM_PRIVATE_KEY_FOR_OPENCODE_APP"
+      webhookSecret: "optional-webhook-secret-for-opencode"
+      commandPrefixes:
+        - "OpenCodeApp"
   # codexNotifyToken: "optional-notify-token"
   # vibeAgentsToken: "optional-vibe-agents-token"
   # opencodePassword: "optional-opencode-password"
@@ -35,19 +45,30 @@ tenants:
         - "/codex"
         - "@codex"
     github:
-      installationId: 123456
-      # Optional: assignment bootstrap handles.
-      # Use assignable GitHub users; app bot logins may not be assignable in all repos.
-      # assignmentAssignees:
-      #   - "codex-operator"
-      repoAllowlist:
-        - "owner/repo"
+      apps:
+        - appKey: "codex"
+          installationId: 123456
+          repoAllowlist:
+            - "owner/repo"
+          # Optional: assignment bootstrap handles.
+          # Use assignable GitHub users; app bot logins may not be assignable in all repos.
+          # assignmentAssignees:
+          #   - "openai-code-agent"
+        - appKey: "opencode"
+          installationId: 234567
+          repoAllowlist:
+            - "owner/repo"
     repos:
       - fullName: "owner/repo"
         path: "/Users/engineer/workspace/opencode-manager"
-        backend: "opencode"              # omit or set "codex" for local Codex SDK
-        agent: "build"                  # backend-specific; currently used by OpenCode
-        model: "openai/gpt-5"           # OpenCode expects provider/model
+        backend: "codex"                # default backend when app-specific override is absent
+        model: "gpt-5.2-codex"
+        githubApps:
+          opencode:
+            backend: "opencode"
+            agent: "build"              # backend-specific; currently used by OpenCode
+            model: "openai/gpt-5"       # OpenCode expects provider/model
+            branchPrefix: "opencode"
         baseBranch: "main"
-        branchPrefix: "opencode"
+        branchPrefix: "codex"
     defaultRepo: "owner/repo"
