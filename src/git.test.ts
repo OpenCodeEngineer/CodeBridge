@@ -45,6 +45,27 @@ describe("git helpers", () => {
     expect(files).not.toContain(".reflection/notes.md")
     expect(files).not.toContain(".tts-debug.log")
   })
+
+  it("flattens accidental nested git repositories before committing", async () => {
+    const repo = await createRepo()
+    repos.push(repo)
+
+    const nestedRepo = path.join(repo, "customer-flow", "issue-1")
+    await mkdir(path.join(nestedRepo, "src"), { recursive: true })
+    execFileSync("git", ["init", "-q"], { cwd: nestedRepo })
+    await writeFile(path.join(nestedRepo, "package.json"), "{\"type\":\"module\"}\n", "utf8")
+    await writeFile(path.join(nestedRepo, "src", "main.ts"), "console.log('Hello, world!')\n", "utf8")
+
+    await commitAll(repo, "flatten nested repo")
+
+    const files = (await git(["show", "--name-only", "--format=", "HEAD"], repo)).split(/\r?\n/).filter(Boolean)
+    expect(files).toContain("customer-flow/issue-1/package.json")
+    expect(files).toContain("customer-flow/issue-1/src/main.ts")
+    expect(files).not.toContain("customer-flow/issue-1")
+
+    const nestedGitPath = path.join(nestedRepo, ".git")
+    await expect(import("node:fs/promises").then(fs => fs.access(nestedGitPath))).rejects.toThrow()
+  })
 })
 
 async function createRepo() {

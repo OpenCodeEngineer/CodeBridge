@@ -509,6 +509,7 @@ function buildGitHubResponseContract(run: RunRecord): string {
     "Final response contract:",
     "- Do not use gh, GitHub MCP/integrations/tools, the GitHub website, or GitHub APIs/CLI to create, update, or comment on GitHub issues or pull requests from inside the task.",
     "- Do not open or update a pull request yourself, and do not run git push to publish branches to GitHub from inside the task.",
+    "- Do not run `git init` or create nested git repositories/submodules inside the working tree.",
     "- CodeBridge owns those GitHub writes, including branch publication, PR creation, PR linking, and publishing your final assistant response to the originating thread.",
     "- Write the final answer so it can be posted to GitHub unchanged.",
     "- For knowledge questions, answer the question directly instead of saying 'comment to post' or describing what you would have posted.",
