@@ -94,7 +94,10 @@ describe("runOpenCodePrompt", () => {
       title: "Session title",
       prompt: "Fix it",
       agent: "build",
-      model: "openai/gpt-5"
+      model: "openai/gpt-5",
+      tools: {
+        github: false
+      }
     })
 
     expect(result.sessionId).toBe("ses_1")
@@ -106,6 +109,9 @@ describe("runOpenCodePrompt", () => {
       model: {
         providerID: "openai",
         modelID: "gpt-5"
+      },
+      tools: {
+        github: false
       }
     })
     expect(promptBody.parts[0]).toMatchObject({
@@ -205,6 +211,168 @@ describe("runOpenCodePrompt", () => {
 
     expect(summaryRequested).toBe(true)
     expect(result.responseText).toBe("Summary text")
+  })
+
+  it("ignores a trailing empty assistant placeholder and summarizes the last meaningful completed turn", async () => {
+    let summaryRequested = false
+    let statusCalls = 0
+
+    const server = await startServer(async (req, res) => {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1")
+
+      if (req.method === "GET" && url.pathname === "/global/health") {
+        return json(res, 200, { healthy: true, version: "1.2.27" })
+      }
+      if (req.method === "POST" && url.pathname === "/session") {
+        return json(res, 200, { id: "ses_1", title: "Session title", directory: "/tmp/repo" })
+      }
+      if (req.method === "POST" && url.pathname === "/session/ses_1/prompt_async") {
+        res.writeHead(204)
+        res.end()
+        return
+      }
+      if (req.method === "GET" && url.pathname === "/session/status") {
+        statusCalls += 1
+        return json(res, 200, statusCalls === 1 ? {
+          ses_1: {
+            type: "busy"
+          }
+        } : {})
+      }
+      if (req.method === "GET" && url.pathname === "/session/ses_1/message") {
+        return json(res, 200, [
+          {
+            info: {
+              id: "msg_1",
+              role: "assistant",
+              time: { created: 1, completed: 2 },
+              providerID: "openai",
+              modelID: "gpt-5"
+            },
+            parts: [
+              {
+                id: "tool_1",
+                type: "tool",
+                tool: "edit",
+                state: {
+                  status: "completed",
+                  title: "Updated file"
+                }
+              }
+            ]
+          },
+          {
+            info: {
+              id: "msg_2",
+              role: "assistant",
+              time: { created: 3 },
+              providerID: "openai",
+              modelID: "gpt-5"
+            },
+            parts: []
+          }
+        ])
+      }
+      if (req.method === "POST" && url.pathname === "/session/ses_1/message") {
+        const body = await readJson(req)
+        summaryRequested = body?.tools?.["*"] === false
+        return json(res, 200, {
+          info: {
+            id: "msg_3",
+            role: "assistant",
+            time: { created: 4, completed: 5 },
+            providerID: "openai",
+            modelID: "gpt-5"
+          },
+          parts: [
+            {
+              id: "part_3",
+              type: "text",
+              text: "Recovered summary"
+            }
+          ]
+        })
+      }
+
+      res.writeHead(404)
+      res.end()
+    })
+    servers.add(server)
+
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    const result = await runOpenCodePrompt({
+      integration: {
+        baseUrl,
+        timeoutMs: 30_000,
+        pollIntervalMs: 10
+      },
+      directory: "/tmp/repo",
+      title: "Session title",
+      prompt: "Fix it",
+      model: "openai/gpt-5"
+    })
+
+    expect(summaryRequested).toBe(true)
+    expect(result.responseText).toBe("Recovered summary")
+  })
+
+  it("fails fast when the session becomes idle with only an empty assistant placeholder", async () => {
+    let statusCalls = 0
+
+    const server = await startServer(async (req, res) => {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1")
+
+      if (req.method === "GET" && url.pathname === "/global/health") {
+        return json(res, 200, { healthy: true, version: "1.2.27" })
+      }
+      if (req.method === "POST" && url.pathname === "/session") {
+        return json(res, 200, { id: "ses_1", title: "Session title", directory: "/tmp/repo" })
+      }
+      if (req.method === "POST" && url.pathname === "/session/ses_1/prompt_async") {
+        res.writeHead(204)
+        res.end()
+        return
+      }
+      if (req.method === "GET" && url.pathname === "/session/status") {
+        statusCalls += 1
+        return json(res, 200, statusCalls === 1 ? {
+          ses_1: {
+            type: "busy"
+          }
+        } : {})
+      }
+      if (req.method === "GET" && url.pathname === "/session/ses_1/message") {
+        return json(res, 200, [
+          {
+            info: {
+              id: "msg_1",
+              role: "assistant",
+              time: { created: 1 },
+              providerID: "github-copilot",
+              modelID: "gemini-3.1-pro-preview"
+            },
+            parts: []
+          }
+        ])
+      }
+
+      res.writeHead(404)
+      res.end()
+    })
+    servers.add(server)
+
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    await expect(runOpenCodePrompt({
+      integration: {
+        baseUrl,
+        timeoutMs: 30_000,
+        pollIntervalMs: 250
+      },
+      directory: "/tmp/repo",
+      title: "Session title",
+      prompt: "Fix it",
+      model: "github-copilot/gemini-3.1-pro-preview"
+    })).rejects.toThrow("OpenCode stalled without a terminal response")
   })
 })
 

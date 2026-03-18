@@ -2,7 +2,9 @@
 
 import { mkdirSync, writeFileSync } from "node:fs"
 import path from "node:path"
+import { pathToFileURL } from "node:url"
 import yaml from "js-yaml"
+import type { EvalGitHubAppIdentity } from "./live-eval-github-apps.js"
 import { resolveRequiredEvalGithubAppsFromEnv } from "./live-eval-github-apps.js"
 
 type Args = {
@@ -10,6 +12,18 @@ type Args = {
   repoPath: string
   repoFullName: string
 }
+
+type ResolvedEvalGithubApps = {
+  codex: EvalGitHubAppIdentity
+  opencode: EvalGitHubAppIdentity
+}
+
+type LiveEvalConfigModels = {
+  codexModel: string
+  opencodeModel?: string
+}
+
+const DEFAULT_LIVE_EVAL_OPENCODE_MODEL = "opencode/minimax-m2.5-free"
 
 function parseArgs(argv: string[]): Args {
   const args: Args = {
@@ -48,14 +62,22 @@ function optionalEnv(name: string): string | undefined {
   return value ? value : undefined
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2))
-  const apps = await resolveRequiredEvalGithubAppsFromEnv()
-  const opencodeBaseUrl = optionalEnv("CODEBRIDGE_EVAL_OPENCODE_BASE_URL") ?? "http://127.0.0.1:4096"
-  const opencodeModel = optionalEnv("CODEBRIDGE_EVAL_OPENCODE_MODEL") ?? "azure/gpt-4.1"
-  const codexModel = optionalEnv("CODEBRIDGE_EVAL_CODEX_MODEL") ?? "gpt-5.2-codex"
+export function buildLiveEvalConfig(input: {
+  args: Args
+  apps: ResolvedEvalGithubApps
+  opencodeBaseUrl: string
+  models: LiveEvalConfigModels
+}) {
+  const { args, apps, opencodeBaseUrl, models } = input
+  const opencodeModel = models.opencodeModel ?? DEFAULT_LIVE_EVAL_OPENCODE_MODEL
+  const opencodeOverride = {
+    backend: "opencode",
+    agent: "build",
+    model: opencodeModel,
+    branchPrefix: "opencodeapp"
+  }
 
-  const config = {
+  return {
     secrets: {
       githubApps: {
         codex: {
@@ -103,19 +125,14 @@ async function main() {
             fullName: args.repoFullName,
             path: args.repoPath,
             backend: "codex",
-            model: codexModel,
+            model: models.codexModel,
             baseBranch: "main",
             branchPrefix: "codexapp",
             githubApps: {
               codex: {
-                model: codexModel
+                model: models.codexModel
               },
-              opencode: {
-                backend: "opencode",
-                agent: "build",
-                model: opencodeModel,
-                branchPrefix: "opencodeapp"
-              }
+              opencode: opencodeOverride
             }
           }
         ],
@@ -123,13 +140,36 @@ async function main() {
       }
     ]
   }
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2))
+  const apps = await resolveRequiredEvalGithubAppsFromEnv()
+  const opencodeBaseUrl = optionalEnv("CODEBRIDGE_EVAL_OPENCODE_BASE_URL") ?? "http://127.0.0.1:4096"
+  const opencodeModel = optionalEnv("CODEBRIDGE_EVAL_OPENCODE_MODEL") ?? DEFAULT_LIVE_EVAL_OPENCODE_MODEL
+  const codexModel = optionalEnv("CODEBRIDGE_EVAL_CODEX_MODEL") ?? "gpt-5.2-codex"
+  const config = buildLiveEvalConfig({
+    args,
+    apps,
+    opencodeBaseUrl,
+    models: {
+      codexModel,
+      opencodeModel
+    }
+  })
 
   mkdirSync(path.dirname(args.outputPath), { recursive: true })
   writeFileSync(args.outputPath, yaml.dump(config, { noRefs: true }), "utf8")
   console.log(args.outputPath)
 }
 
-main().catch(error => {
-  console.error(error instanceof Error ? error.message : String(error))
-  process.exit(1)
-})
+const isMain = process.argv[1]
+  ? import.meta.url === pathToFileURL(process.argv[1]).href
+  : false
+
+if (isMain) {
+  main().catch(error => {
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exit(1)
+  })
+}

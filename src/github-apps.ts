@@ -80,12 +80,14 @@ export function resolveRepoForGithubApp(repo: RepoConfig, appKey?: string): Repo
   if (!normalized) return repo
   const override = repo.githubApps?.[normalized]
   if (!override) return repo
+  const resolvedBackend = override.backend ?? repo.backend
+  const backendChanged = Boolean(override.backend && override.backend !== repo.backend)
 
   return {
     ...repo,
-    backend: override.backend ?? repo.backend,
-    agent: override.agent ?? repo.agent,
-    model: override.model ?? repo.model,
+    backend: resolvedBackend,
+    agent: override.agent ?? (backendChanged ? undefined : repo.agent),
+    model: override.model ?? (backendChanged ? undefined : repo.model),
     baseBranch: override.baseBranch ?? repo.baseBranch,
     branchPrefix: override.branchPrefix ?? repo.branchPrefix
   }

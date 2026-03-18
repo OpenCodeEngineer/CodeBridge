@@ -1,5 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
+const codexSdkMocks = vi.hoisted(() => {
+  const runStreamed = vi.fn()
+  const startThread = vi.fn(() => ({ runStreamed }))
+  const Codex = vi.fn(function MockCodex() {
+    return { startThread }
+  })
+  return { Codex, startThread, runStreamed }
+})
+
 const gitMocks = vi.hoisted(() => ({
   countCommitsAhead: vi.fn(),
   currentBranch: vi.fn(),
@@ -23,6 +32,9 @@ const githubIssueStateMocks = vi.hoisted(() => ({
   syncIssueLifecycleState: vi.fn()
 }))
 
+vi.mock("@openai/codex-sdk", () => ({
+  Codex: codexSdkMocks.Codex
+}))
 vi.mock("./git.js", () => gitMocks)
 vi.mock("./opencode.js", () => opencodeMocks)
 vi.mock("./github-apps.js", () => githubAppsMocks)
@@ -33,6 +45,13 @@ describe("runner OpenCode PR detection", () => {
     vi.resetAllMocks()
     gitMocks.countCommitsAhead.mockResolvedValue(0)
     gitMocks.currentBranch.mockResolvedValue("opencode/99-run_123")
+    codexSdkMocks.runStreamed.mockReset()
+    codexSdkMocks.startThread.mockReset()
+    codexSdkMocks.startThread.mockImplementation(() => ({ runStreamed: codexSdkMocks.runStreamed }))
+    codexSdkMocks.Codex.mockReset()
+    codexSdkMocks.Codex.mockImplementation(function MockCodex() {
+      return { startThread: codexSdkMocks.startThread }
+    })
   })
 
   it("treats a backend-created PR as success even when the repo is clean", async () => {
@@ -87,6 +106,11 @@ describe("runner OpenCode PR detection", () => {
 
     await runner({ runId: "run_123" })
 
+    expect(opencodeMocks.runOpenCodePrompt).toHaveBeenCalledWith(expect.objectContaining({
+      tools: {
+        github: false
+      }
+    }))
     expect(store.updateRunPr).toHaveBeenCalledWith("run_123", 42, "https://github.com/acme/widgets/pull/42")
     expect(statuses).toEqual(["running", "succeeded"])
     expect(githubIssueStateMocks.syncIssueLifecycleState).toHaveBeenNthCalledWith(
@@ -341,6 +365,71 @@ describe("runner OpenCode PR detection", () => {
   })
 })
 
+describe("runner Codex execution", () => {
+  beforeEach(() => {
+    vi.resetAllMocks()
+    gitMocks.countCommitsAhead.mockResolvedValue(0)
+    gitMocks.currentBranch.mockResolvedValue("codex/99-run_123")
+    gitMocks.getDefaultBranchFromOrigin.mockResolvedValue("main")
+    gitMocks.isDirty.mockResolvedValue(false)
+    codexSdkMocks.runStreamed.mockResolvedValue({
+      events: (async function* () {
+        yield {
+          type: "item.completed",
+          item: {
+            type: "agent_message",
+            text: "Completed without file changes."
+          }
+        }
+        yield {
+          type: "turn.completed",
+          usage: {
+            output_tokens: 1
+          }
+        }
+      })()
+    })
+    codexSdkMocks.startThread.mockImplementation(() => ({ runStreamed: codexSdkMocks.runStreamed }))
+    codexSdkMocks.Codex.mockImplementation(function MockCodex() {
+      return { startThread: codexSdkMocks.startThread }
+    })
+  })
+
+  it("uses a supported reasoning effort for GPT-5 Codex models", async () => {
+    const statuses: string[] = []
+    const store = {
+      getRun: vi.fn().mockResolvedValue(makeRun({
+        backend: "codex",
+        agent: undefined,
+        model: "gpt-5.2-codex",
+        github: undefined
+      })),
+      updateRunStatus: vi.fn().mockImplementation(async (_id: string, status: string) => {
+        statuses.push(status)
+      }),
+      updateRunBranch: vi.fn().mockResolvedValue(undefined),
+      updateRunPr: vi.fn().mockResolvedValue(undefined),
+      appendEvent: vi.fn().mockResolvedValue(undefined)
+    }
+
+    const { createRunner } = await import("./runner.js")
+    const runner = createRunner({
+      store: store as any,
+      env: {
+        codexTurnTimeoutMs: 60_000
+      }
+    })
+
+    await runner({ runId: "run_123" })
+
+    expect(codexSdkMocks.startThread).toHaveBeenCalledWith(expect.objectContaining({
+      model: "gpt-5.2-codex",
+      modelReasoningEffort: "low"
+    }))
+    expect(statuses).toEqual(["running", "no_changes"])
+  })
+})
+
 describe("extractPullRequestReference", () => {
   it("extracts a GitHub PR URL from markdown links and raw text", async () => {
     const { _testHelpers } = await import("./runner.js")
@@ -364,9 +453,28 @@ describe("extractPullRequestReference", () => {
     const { _testHelpers } = await import("./runner.js")
     expect(_testHelpers.extractPullRequestReference("Completed without a pull request.")).toBeNull()
   })
+
+  it("tells GitHub-originated runs to leave PR creation to CodeBridge", async () => {
+    const { _testHelpers } = await import("./runner.js")
+    const contract = _testHelpers.buildGitHubResponseContract(makeRun())
+
+    expect(contract).toContain("Do not use gh, GitHub MCP/integrations/tools, the GitHub website, or GitHub APIs/CLI")
+    expect(contract).toContain("do not run git push to publish branches to GitHub")
+    expect(contract).toContain("CodeBridge owns those GitHub writes, including branch publication, PR creation")
+    expect(contract).toContain("CodeBridge will publish the branch and open the PR with the correct GitHub App identity")
+  })
+
+  it("disables the GitHub tool for GitHub-originated OpenCode runs", async () => {
+    const { _testHelpers } = await import("./runner.js")
+    expect(_testHelpers.resolveOpenCodeTools(makeRun())).toEqual({ github: false })
+    expect(_testHelpers.resolveOpenCodeTools({
+      ...makeRun(),
+      github: undefined
+    } as any)).toBeUndefined()
+  })
 })
 
-function makeRun() {
+function makeRun(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     id: "run_123",
     tenantId: "tenant_1",
@@ -389,6 +497,7 @@ function makeRun() {
       issueBody: "Implement multi-app routing."
     },
     createdAt: new Date("2026-03-17T07:00:00Z").toISOString(),
-    updatedAt: new Date("2026-03-17T07:00:00Z").toISOString()
+    updatedAt: new Date("2026-03-17T07:00:00Z").toISOString(),
+    ...overrides
   }
 }

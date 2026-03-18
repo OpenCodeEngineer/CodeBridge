@@ -102,7 +102,7 @@ Typical local dev defaults:
 ```bash
 export PORT=8788
 export ROLE=all
-export DATABASE_URL=sqlite://./data/codebridge.db
+export DATABASE_URL=./data/codebridge.db
 export QUEUE_MODE=memory
 export GITHUB_POLL_INTERVAL=15
 export GITHUB_POLL_BACKFILL=false
@@ -343,7 +343,7 @@ CodeBridge currently executes against the configured local checkout path. It doe
 Backend behavior:
 
 - `codex`: CodeBridge starts a local Codex SDK thread in `repo.path`.
-- `opencode`: CodeBridge still prepares the git branch locally, then creates an OpenCode session over HTTP and scopes that session to the same `repo.path`. If OpenCode leaves the checkout clean, CodeBridge does not assume `no_changes`: it first looks for a returned PR URL, then checks whether the prepared branch is ahead of the remote base branch, pushes that branch if needed, reuses an already-open PR for that head branch, or creates the PR itself.
+- `opencode`: CodeBridge still prepares the git branch locally, then creates an OpenCode session over HTTP and scopes that session to the same `repo.path`. For GitHub-originated runs, the preferred contract is that OpenCode does not use GitHub tooling or `git push`; it leaves local edits or local commits for CodeBridge to publish with the handling app identity. CodeBridge also sends `tools.github=false` on those prompt requests so the OpenCode server cannot use its configured GitHub MCP for that run. If OpenCode still leaves the checkout clean, CodeBridge does not assume `no_changes`: it first looks for a returned PR URL, then checks whether the prepared branch is ahead of the remote base branch, pushes that branch if needed, reuses an already-open PR for that head branch, or creates the PR itself.
 
 Before starting a run, the worker:
 
@@ -409,10 +409,11 @@ Runs the required live customer-flow mission gate:
 pnpm eval:customer-flow -- \
   --repo dzianisv/codebridge-test \
   --repo-path /absolute/path/to/dedicated/codebridge-test-clone \
-  --database-url sqlite:///absolute/path/to/codebridge-eval.db
+  --database-url /absolute/path/to/codebridge-eval.db
 ```
 
 This suite is only valid when Codex and OpenCode are backed by distinct installed GitHub Apps, each addressed by its real handle.
+The live-eval config now defaults the OpenCode route to `opencode/minimax-m2.5-free`, which completed a real repo mutation on March 18, 2026 after the default GitHub Copilot route hit global rate limits. Override `CODEBRIDGE_EVAL_OPENCODE_MODEL` only if your local server has a better supported model.
 
 It proves two user-facing GitHub flows end to end:
 
@@ -424,6 +425,7 @@ It verifies:
 - GitHub-visible evidence: the trigger comment used the real handle, the expected bot replied on the issue thread, and the OpenCode PR author matches the expected app
 - persistence evidence: `backend`, `github_app_key`, and final run status from the live bridge database
 - executable PR verification: `bun test` and `bun run src/main.ts` on the generated PR branch
+- backend publication contract: the OpenCode eval task forbids GitHub writes and `git push` from inside the backend task, and CodeBridge sends `tools.github=false` on GitHub-originated OpenCode prompts so the bridge must publish the branch and PR itself
 - branch-ahead recovery: OpenCode is allowed to commit and push before CodeBridge inspects git state, and the bridge must still recover the PR flow instead of misclassifying the run as `no_changes`
 - identity proof: the evaluator resolves the real GitHub App slugs and bot logins from credentials and fails if the two app keys share one GitHub App identity
 

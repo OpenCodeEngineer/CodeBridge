@@ -29,6 +29,7 @@ import { createGitHubInstallationClientFactory, type GitHubAppMap } from "./gith
 
 const disabledMcpServersCache = new Map<string, Promise<Record<string, { enabled: boolean }>>>()
 const GITHUB_PULL_REQUEST_URL_PATTERN = /https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/(\d+)\/?/i
+const DEFAULT_GPT5_CODEX_REASONING_EFFORT = "low"
 
 export type RunnerEnv = {
   codexPath?: string
@@ -324,6 +325,7 @@ async function executeCodexTurn(params: {
   const thread = codex.startThread({
     workingDirectory: params.run.repoPath,
     model: params.run.model,
+    modelReasoningEffort: resolveCodexModelReasoningEffort(params.run.model),
     sandboxMode: "workspace-write",
     approvalPolicy: "never"
   })
@@ -373,6 +375,7 @@ async function executeOpenCodeTurn(params: {
     prompt: params.prompt,
     agent: params.run.agent,
     model: params.run.model,
+    tools: resolveOpenCodeTools(params.run),
     onActivity: async (activity) => {
       handleOpenCodeActivity(params.tracker, activity)
       await params.appendRunEvent(`opencode.${activity.type}`, activity as unknown as Record<string, unknown>)
@@ -504,9 +507,12 @@ function buildGitHubResponseContract(run: RunRecord): string {
   if (!run.github) return ""
   return [
     "Final response contract:",
-    "- Do not use gh or GitHub APIs/CLI to post back to GitHub. CodeBridge will publish your final assistant response to the originating thread.",
+    "- Do not use gh, GitHub MCP/integrations/tools, the GitHub website, or GitHub APIs/CLI to create, update, or comment on GitHub issues or pull requests from inside the task.",
+    "- Do not open or update a pull request yourself, and do not run git push to publish branches to GitHub from inside the task.",
+    "- CodeBridge owns those GitHub writes, including branch publication, PR creation, PR linking, and publishing your final assistant response to the originating thread.",
     "- Write the final answer so it can be posted to GitHub unchanged.",
     "- For knowledge questions, answer the question directly instead of saying 'comment to post' or describing what you would have posted.",
+    "- If code changes are ready for review, leave the local repository in that ready state and describe the result. Local file edits and local commits are fine. CodeBridge will publish the branch and open the PR with the correct GitHub App identity.",
     "- If you ran important commands or tests, include a 'Command results' section with the command and whether it passed.",
     "- If a PR exists, include the full GitHub PR URL in the final response.",
     "- Do not mention an inability to comment on GitHub unless the user explicitly asked you to use GitHub tooling from inside the task."
@@ -518,6 +524,13 @@ function buildOpenCodeSessionTitle(run: RunRecord): string {
     return `${run.repoFullName}#${run.github.issueNumber} ${run.id}`
   }
   return `${run.repoFullName} ${run.id}`
+}
+
+function resolveOpenCodeTools(run: RunRecord): Record<string, boolean> | undefined {
+  if (!run.github) return undefined
+  return {
+    github: false
+  }
 }
 
 function buildCommitMessage(run: RunRecord): string {
@@ -689,6 +702,12 @@ function parseMcpServerNames(output: string): string[] {
   return [...names]
 }
 
+function resolveCodexModelReasoningEffort(model: string | undefined): "low" | undefined {
+  const normalized = model?.trim().toLowerCase()
+  if (!normalized) return undefined
+  return normalized.startsWith("gpt-5") ? DEFAULT_GPT5_CODEX_REASONING_EFFORT : undefined
+}
+
 function extractPullRequestReference(text: string): { url: string; number: number } | null {
   const match = text.match(GITHUB_PULL_REQUEST_URL_PATTERN)
   if (!match) return null
@@ -703,5 +722,8 @@ function extractPullRequestReference(text: string): { url: string; number: numbe
 }
 
 export const _testHelpers = {
-  extractPullRequestReference
+  extractPullRequestReference,
+  resolveCodexModelReasoningEffort,
+  buildGitHubResponseContract,
+  resolveOpenCodeTools
 }

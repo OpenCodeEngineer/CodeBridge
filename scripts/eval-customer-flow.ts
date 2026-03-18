@@ -315,11 +315,13 @@ function postIssueComment(repo: string, issueNumber: number, body: string): Issu
   const parsed = JSON.parse((result.stdout || "").trim()) as { id?: number; html_url?: string }
   const id = Number(parsed.id)
   const url = parsed.html_url ?? `https://github.com/${repo}/issues/${issueNumber}`
-  const body = typeof (parsed as { body?: string }).body === "string" ? (parsed as { body?: string }).body ?? "" : ""
+  const commentBody = typeof (parsed as { body?: string }).body === "string"
+    ? (parsed as { body?: string }).body ?? ""
+    : ""
   if (!id) {
     throw new Error(`gh issue comment returned invalid response: ${(result.stdout || "").trim()}`)
   }
-  return { id, url, body }
+  return { id, url, body: commentBody }
 }
 
 function listIssueComments(repo: string, issueNumber: number): BotComment[] {
@@ -753,8 +755,10 @@ function buildMissionCases(args: Args): MissionCaseDefinition[] {
           `- Add \`${workDir}/src/hello.test.ts\` using Bun's built-in test runner to verify \`hello()\` returns exactly \`Hello, world!\`.`,
           `- Run \`bun test\` inside \`${workDir}\`.`,
           `- Run \`bun run src/main.ts\` inside \`${workDir}\`.`,
-          `- Open a pull request linked to this issue with \`Closes #${issueNumber}\` in the PR body.`,
-          "- Post the PR URL and the command results back on this issue."
+          "- Do not use gh, GitHub MCP/integrations/tools, the GitHub website, or any GitHub API/CLI from inside the task.",
+          "- Do not open or update a pull request yourself, and do not run git push.",
+          `- Leave the repository locally ready for CodeBridge to open a pull request that closes #${issueNumber}.`,
+          "- Include the command results in your final response."
         ].join("\n")
       },
       verificationKind: "bun-pr",

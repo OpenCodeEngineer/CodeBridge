@@ -85,6 +85,23 @@ describe("resolveRepoForGithubApp", () => {
     expect(resolved.agent).toBe("build")
     expect(resolved.model).toBe("openai/gpt-5")
   })
+
+  it("does not inherit backend-specific model or agent when the app override changes backend", () => {
+    const repo = makeRepo({
+      agent: "codex-review",
+      model: "gpt-5.2-codex",
+      githubApps: {
+        opencode: {
+          backend: "opencode"
+        }
+      }
+    })
+
+    const resolved = resolveRepoForGithubApp(repo, "opencode")
+    expect(resolved.backend).toBe("opencode")
+    expect(resolved.agent).toBeUndefined()
+    expect(resolved.model).toBeUndefined()
+  })
 })
 
 describe("selectGithubAppKeyForBackend", () => {

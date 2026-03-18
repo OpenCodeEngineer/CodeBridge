@@ -5,6 +5,7 @@ const DEFAULT_TIMEOUT_MS = 300_000
 const DEFAULT_POLL_INTERVAL_MS = 2_000
 const DEFAULT_READ_REQUEST_TIMEOUT_MS = 60_000
 const DEFAULT_WRITE_REQUEST_TIMEOUT_MS = 60_000
+const DEFAULT_EMPTY_ASSISTANT_STALL_MS = 2_000
 
 export type OpenCodeSessionStatus =
   | { type: "idle" }
@@ -120,6 +121,7 @@ export type RunOpenCodePromptInput = {
   prompt: string
   agent?: string
   model?: string
+  tools?: Record<string, boolean>
   onActivity?: (activity: OpenCodeActivity) => Promise<void> | void
 }
 
@@ -164,7 +166,9 @@ export async function runOpenCodePrompt(input: RunOpenCodePromptInput): Promise<
   const seenPartIds = new Set<string>()
   const timeoutMs = Math.max(30_000, input.integration.timeoutMs ?? DEFAULT_TIMEOUT_MS)
   const pollIntervalMs = Math.max(250, input.integration.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS)
+  const emptyAssistantStallMs = Math.max(DEFAULT_EMPTY_ASSISTANT_STALL_MS, pollIntervalMs * 6)
   const deadline = Date.now() + timeoutMs
+  const assistantFirstSeenAtMs = new Map<string, number>()
 
   const health = await client.requestJson<{ healthy: boolean; version: string }>("GET", "/global/health")
   if (!health.healthy) {
@@ -180,6 +184,7 @@ export async function runOpenCodePrompt(input: RunOpenCodePromptInput): Promise<
   await client.request("POST", `/session/${encodeURIComponent(session.id)}/prompt_async`, {
     agent: input.agent,
     model: parseOpenCodeModel(input.model),
+    tools: input.tools,
     parts: [
       {
         type: "text",
@@ -199,6 +204,7 @@ export async function runOpenCodePrompt(input: RunOpenCodePromptInput): Promise<
     const messages = await client.requestJson<OpenCodeMessage[]>("GET", `/session/${encodeURIComponent(session.id)}/message`)
     await emitNewParts(messages, seenPartIds, input.onActivity)
     lastAssistant = findLastAssistantMessage(messages)
+    rememberAssistantSeenAt(lastAssistant, assistantFirstSeenAtMs)
 
     try {
       const statuses = await client.requestJson<Record<string, OpenCodeSessionStatus>>("GET", "/session/status")
@@ -211,6 +217,16 @@ export async function runOpenCodePrompt(input: RunOpenCodePromptInput): Promise<
 
       if ((status.type === "idle" || !statuses[session.id]) && isAssistantTerminal(lastAssistant)) {
         break
+      }
+      if (
+        status.type === "idle"
+        && isAssistantPlaceholderStalled(lastAssistant, assistantFirstSeenAtMs, Date.now(), emptyAssistantStallMs)
+      ) {
+        throw new Error(
+          "OpenCode stalled without a terminal response after the session became idle. " +
+          `Session: ${session.id}. Provider: ${lastAssistant?.info.providerID ?? "unknown"}/` +
+          `${lastAssistant?.info.modelID ?? "unknown"}.`
+        )
       }
 
       const retryDelayMs = status.type === "retry"
@@ -269,17 +285,41 @@ export async function runOpenCodePrompt(input: RunOpenCodePromptInput): Promise<
 }
 
 function findLastAssistantMessage(messages: OpenCodeMessage[]): OpenCodeMessage | null {
+  let fallback: OpenCodeMessage | null = null
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index]?.info.role === "assistant") {
-      return messages[index] ?? null
+    const message = messages[index]
+    if (message?.info.role !== "assistant") continue
+    fallback ??= message
+    if (message.parts.length > 0 || isAssistantTerminal(message)) {
+      return message
     }
   }
-  return null
+  return fallback
 }
 
 function isAssistantTerminal(message: OpenCodeMessage | null): boolean {
   if (!message) return false
   return Boolean(message.info.time.completed || message.info.error)
+}
+
+function rememberAssistantSeenAt(message: OpenCodeMessage | null, seenAtMs: Map<string, number>) {
+  const id = message?.info.id
+  if (!id || seenAtMs.has(id)) return
+  seenAtMs.set(id, Date.now())
+}
+
+function isAssistantPlaceholderStalled(
+  message: OpenCodeMessage | null,
+  seenAtMs: Map<string, number>,
+  now: number,
+  stallMs: number
+): boolean {
+  const id = message?.info.id
+  if (!id || !message) return false
+  if (isAssistantTerminal(message) || message.parts.length > 0) return false
+  const firstSeenAt = seenAtMs.get(id)
+  if (!firstSeenAt) return false
+  return now - firstSeenAt >= stallMs
 }
 
 function formatStatusKey(status: OpenCodeSessionStatus): string {

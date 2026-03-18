@@ -35,7 +35,7 @@ jobs:
       AZURE_OPENAI_BASE_URL: ${{ secrets.AZURE_OPENAI_BASE_URL }}
       AZURE_RESOURCE_NAME: ${{ secrets.AZURE_RESOURCE_NAME }}
       CODEBRIDGE_EVAL_REPO: dzianisv/codebridge-test
-      CODEBRIDGE_EVAL_OPENCODE_MODEL: azure/gpt-4.1
+      CODEBRIDGE_EVAL_OPENCODE_MODEL: opencode/minimax-m2.5-free
 
     steps:
       - name: Checkout
@@ -151,7 +151,7 @@ jobs:
           PORT: 8790
           ROLE: all
           QUEUE_MODE: memory
-          DATABASE_URL: sqlite://${{ runner.temp }}/codebridge-eval/codebridge.db
+          DATABASE_URL: ${{ runner.temp }}/codebridge-eval/codebridge.db
           CONFIG_PATH: ${{ runner.temp }}/codebridge-eval/config.yaml
           GITHUB_POLL_INTERVAL: 5
           GITHUB_POLL_BACKFILL: "false"
@@ -179,7 +179,7 @@ jobs:
           pnpm tsx scripts/eval-customer-flow.ts \
             --repo "$CODEBRIDGE_EVAL_REPO" \
             --repo-path "$RUNNER_TEMP/codebridge-test" \
-            --database-url "sqlite://$RUNNER_TEMP/codebridge-eval/codebridge.db" \
+            --database-url "$RUNNER_TEMP/codebridge-eval/codebridge.db" \
             --codex-app-key "codex" \
             --opencode-app-key "opencode"
 

@@ -31,7 +31,7 @@ Shared credentials under two different `appKey` names are not accepted.
    - creates a Bun + TypeScript hello-world app in an issue-scoped directory
    - runs `bun test`
    - runs `bun run src/main.ts`
-   - opens a pull request linked to the issue
+   - leaves the repository locally ready for CodeBridge to open a pull request linked to the issue
    - reports the PR URL and command results back on the issue thread
    - expected final run status in persistence: `succeeded`
 
@@ -47,6 +47,7 @@ It checks three evidence layers:
   - PR URL
   - PR author matches the expected app for the OpenCode route
   - PR body linkage
+- For the OpenCode PR case, the live-eval prompt explicitly forbids the backend from using GitHub CLI/MCP/API/website writes or `git push` to publish the PR flow itself. CodeBridge also sends `tools.github=false` on GitHub-originated OpenCode prompt requests so the local OpenCode server cannot reach its configured GitHub MCP during the eval. CodeBridge must publish the branch and create the PR with the handling GitHub App identity after the backend leaves the local checkout ready for review.
 - CodeBridge persistence
   - `backend`
   - `github_app_key`
@@ -77,7 +78,7 @@ Historical note:
 pnpm tsx scripts/eval-customer-flow.ts \
   --repo dzianisv/codebridge-test \
   --repo-path /absolute/path/to/dedicated/codebridge-test-clone \
-  --database-url sqlite:///absolute/path/to/codebridge-eval.db \
+  --database-url /absolute/path/to/codebridge-eval.db \
   --codex-app-key codex \
   --opencode-app-key opencode \
   --timeout 300 \
@@ -130,6 +131,8 @@ The workflow is intentionally separate from the fast PR CI because it creates re
 Optional overrides:
 
 - `CODEBRIDGE_EVAL_OPENCODE_MODEL`
+  - defaults to `opencode/minimax-m2.5-free`, which completed a real repo mutation against `opencode serve` on March 18, 2026 while the GitHub Copilot default route was rate-limited
+  - override it only when your local OpenCode server explicitly supports a better `provider/model`
 
 Important:
 
@@ -156,4 +159,5 @@ It writes a tenant config that:
 - maps the test repository to the dedicated checkout path,
 - keeps `codex` as the default route,
 - overrides only the OpenCode route to backend `opencode`,
+- defaults the OpenCode `model` field to `opencode/minimax-m2.5-free` unless `CODEBRIDGE_EVAL_OPENCODE_MODEL` is explicitly set,
 - binds the real GitHub App slugs as the accepted mention prefixes for the eval run.

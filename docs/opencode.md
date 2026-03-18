@@ -128,6 +128,7 @@ Important constraints:
 - `backend` defaults to `codex`
 - `agent` is backend-specific metadata and is currently used by OpenCode
 - OpenCode `model` values must use `provider/model` format
+- model availability is still server-specific, but the live-eval path now defaults to `opencode/minimax-m2.5-free` because that provider/model completed a real repo mutation against `opencode serve` on March 18, 2026
 
 ## Persistence And UX
 
@@ -150,10 +151,15 @@ Validated on March 17, 2026:
 - The OpenCode server was healthy and reachable over HTTP.
 - The adapter successfully created a session, delegated a repo mutation, and collected the assistant response.
 - OpenCode can complete a task with tool-only terminal output. CodeBridge now issues a summary follow-up in the same session when that happens so GitHub still gets a human-readable final message.
-- OpenCode can also create and open a PR itself before CodeBridge checks git status. The runner now parses a returned GitHub PR URL and records the run as `succeeded` even when the checkout is already clean.
+- OpenCode can also create and open a PR itself before CodeBridge checks git status. CodeBridge still understands that fallback path for compatibility, but the preferred contract is that GitHub-originated runs leave PR creation to CodeBridge so the PR author remains the handling GitHub App identity.
+- For GitHub-originated runs, the preferred contract is now stricter: the backend should avoid GitHub MCP/API/website writes and should not `git push`. It should leave local edits or local commits for CodeBridge to publish with the correct GitHub App identity.
+- CodeBridge now enforces that contract at the transport layer for OpenCode by sending `tools.github=false` on GitHub-originated prompt requests. That blocks the server's configured GitHub MCP for those runs without changing the user's global OpenCode config.
 - A March 18, 2026 live eval failure on `dzianisv/codebridge-test#536` showed another edge case: OpenCode committed and pushed branch `opencodeapp-guzqj7ve` without returning a PR URL, leaving the checkout clean while the branch was still ahead of `main` by one commit. The runner now checks branch-ahead state and recovers the PR flow instead of misclassifying that run as `no_changes`.
 - Live runs produced transient untracked artifacts such as `.reflection/`, `.tts/`, and `.tts-debug.log`. CodeBridge now ignores those during dirty checks and unstages them before commit so PRs only include requested changes.
 - Status polling can lag slightly behind the terminal assistant output. The adapter now tolerates status polling failures after a terminal assistant message has already been observed.
+- A March 18, 2026 live-eval verification run showed that hardcoding `azure/gpt-4.1` in the temporary eval config was not portable across local OpenCode servers, and the default GitHub Copilot route could also stall behind global rate limits. The eval config now defaults the OpenCode route to `opencode/minimax-m2.5-free`, which completed a real repo mutation on the same day, and `CODEBRIDGE_EVAL_OPENCODE_MODEL` remains available as an explicit override.
+- A March 18, 2026 hard-gate rerun also showed that asking the backend itself to open the PR can leak GitHub authorship to a local human credential. GitHub-originated prompts now instruct the backend to avoid GitHub writes and `git push`, leave the repo locally ready, and let CodeBridge publish the branch and final PR with the handling GitHub App installation token. CodeBridge also sends `tools.github=false` on those OpenCode prompt requests so the server cannot silently fall back to its local GitHub MCP.
+- Another March 18, 2026 probe showed a specific adapter failure mode on the GitHub Copilot default route: OpenCode could leave an empty assistant placeholder and disappear from `/session/status` after a model-side failure. The adapter now fails fast on that empty-placeholder stall instead of burning the full turn timeout.
 - Customer-flow rerun evidence after the backend-created-PR fix:
   - issue: `dzianisv/codebridge-test#524`
   - run id: `ZkkIiFQf`
