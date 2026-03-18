@@ -40,11 +40,12 @@ pnpm test:github-protocol \
   [--pr-repo <owner/repo>] \
   --discussion-repo <owner/repo> \
   --assignment-handle <@native-assignable-handle> \
-  --database-url <sqlite://path-to-running-bridge.db> \
+  --database-url <path-to-running-bridge.db> \
   --discussion-number <existing-discussion-number>
 ```
 
 If `--pr-repo` is omitted, the runner reuses `--issue-repo`.
+For file-backed SQLite, both a plain `.db` path and a legacy `sqlite://...` URL are accepted. Plain paths are preferred.
 
 In multi-app mode, run the protocol once per app key/backend route you want to validate.
 
@@ -84,7 +85,7 @@ pnpm test:github-assignment-evidence -- --repo <owner/repo> --assignment-handle 
   - In that case, assignment case is reported as `blocked` with native actor diagnostics.
 - Discussions require explicit app permissions beyond Issues/PR permissions.
   - Without Discussions permission, protocol runner emits a signed synthetic `discussion_comment` webhook and verifies run creation via `sourceKey` in persistence.
-  - When the bridge runs on a non-default sqlite path, pass the same runtime DB via `--database-url` so the fallback looks at the correct persistence file.
+  - When the bridge runs on a non-default SQLite file path, pass the same runtime DB via `--database-url` so the fallback looks at the correct persistence file.
 - Discussion case now targets an existing discussion thread (no `createDiscussion` mutation required).
   - Use `--discussion-number` to force a stable target.
   - If omitted, the script uses the most recently updated discussion.
@@ -105,7 +106,7 @@ bun scripts/runGithubMentionE2ETest.ts \
   --poll 5 \
   --hook-target http://127.0.0.1:8788/github/webhook/codex \
   --webhook-secret codebridge-eval-secret \
-  --database-url sqlite:///var/folders/gq/0rs975rd2b9bj2h6zkymwx6r0000gn/T/codebridge-e2e-wvi_bl7g/codebridge-e2e.db
+  --database-url /var/folders/gq/0rs975rd2b9bj2h6zkymwx6r0000gn/T/codebridge-e2e-wvi_bl7g/codebridge-e2e.db
 ```
 
 Result matrix:

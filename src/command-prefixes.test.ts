@@ -86,15 +86,24 @@ describe("buildAssigneeMentionPrefixes", () => {
 })
 
 describe("buildGithubCommandPrefixes", () => {
-  it("combines configured aliases, assignee aliases, and resolved defaults", () => {
+  it("uses only the resolved real app handle when defaults are available", () => {
     const result = buildGithubCommandPrefixes({
       configured: ["CodexApp", "@custom"],
       assignmentAssignees: ["openai-code-agent"],
       defaultPrefixes: ["@codexapp"]
     })
 
-    expect(result).toContain("@codexapp")
+    expect(result).toEqual(["@codexapp"])
+  })
+
+  it("falls back to configured prefixes only when the real app handle is unavailable", () => {
+    const result = buildGithubCommandPrefixes({
+      configured: ["CodexApp", "@custom"],
+      assignmentAssignees: ["openai-code-agent"]
+    })
+
+    expect(result).toContain("@CodexApp")
     expect(result).toContain("@custom")
-    expect(result).toContain("@openai-code-agent")
+    expect(result).not.toContain("@openai-code-agent")
   })
 })

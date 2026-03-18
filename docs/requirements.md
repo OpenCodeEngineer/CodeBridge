@@ -19,16 +19,19 @@ Make GitHub issue and PR conversation threads behave like a chat surface with th
 - A human can start an agent run by assigning the issue to an assignment trigger handle:
   - GitHub App bot account (if assignable in that repo), or
   - one of `github.assignmentAssignees` configured for the tenant.
-- A human can also start a run by mentioning the GitHub App in:
 - A deployment can support multiple GitHub Apps at the same time, with app identity selecting the backend route for the same repository when configured.
 - A human can also start a run by mentioning the GitHub App in:
   - issue comments
   - PR conversation comments
   - PR review comments
   - discussion comments
-  - Example: `@CodexEngineer investigate flaky CI in this repo`
+  - Example: `@codexengineer investigate flaky CI in this repo`
 - The bootstrap action must be treated as a run request without requiring CLI access.
 - If repository/org policy does not allow assigning the App bot as assignee, mention-based bootstrap is the required fallback.
+- For GitHub comment-triggered bootstrap and explicit commands, the accepted handle must be the exact resolved GitHub App slug token (`@<app-slug>`), not an arbitrary configured alias.
+- If GitHub App identity resolution is temporarily unavailable, a configured `commandPrefixes` fallback is acceptable only when it equals the real slug exactly.
+- `github.assignmentAssignees` are for assignment bootstrap only. They must not widen accepted GitHub comment prefixes.
+- GitHub may render the exact app slug token as plain text rather than an inline mention link in the issue body, so validity is defined by exact slug match plus matching app-authored response, not by UI highlighting alone.
 
 ### R2. Conversational Mode After Bootstrap
 
@@ -37,8 +40,8 @@ Make GitHub issue and PR conversation threads behave like a chat surface with th
 - Mentioning the app remains allowed but optional after bootstrap.
 - Plain follow-up comments on managed issue/PR conversation threads must be consumed only by the app that owns the latest run on that thread.
 - Explicitly mentioning a different app on the same managed thread must start a new run under that app instead of relaying into the previous app session.
-- PR review comments remain explicit-command only: each follow-up must still mention the app or use a configured prefix, and responses are written back to the PR conversation thread.
-- Discussion follow-up remains explicit-command only: each follow-up must still mention the app or use a configured prefix.
+- PR review comments remain explicit-command only: each follow-up must still mention the exact app slug handle, and responses are written back to the PR conversation thread.
+- Discussion follow-up remains explicit-command only: each follow-up must still mention the exact app slug handle.
 - Explicit `status`, `pause`, and `resume` commands must work on managed issue and PR conversation threads without being misrouted as normal follow-up text.
 - Explicit `status`, `pause`, and `resume` commands must also work from PR review comments when explicitly prefixed.
 - On discussions, `status`, `pause`, and `resume` must return an unsupported-surface message rather than silently doing nothing.
@@ -123,7 +126,7 @@ Make GitHub issue and PR conversation threads behave like a chat surface with th
 
 - A user can open GitHub Issue UI and interact with the configured coding agent backend as if chatting with a user.
 - First interaction uses assignment-to-app or app mention; later messages on the managed issue or PR conversation thread can be plain text.
-- Discussion follow-up remains explicit mention/prefix based.
+- Discussion follow-up remains explicit exact-app-slug based.
 - `tenant:<id>` reliably routes commands to the desired tenant.
 - Two GitHub Apps can watch the same repository concurrently without poll-state collisions or cross-app managed-thread misrouting.
 - Backend selection is deterministic per configured repo and still uses the exact configured local checkout path.

@@ -146,7 +146,7 @@ export type EnvConfig = {
 export function loadEnv(): EnvConfig {
   const role = (process.env.ROLE ?? "all") as EnvConfig["role"]
   const port = parseInt(process.env.PORT ?? "8788", 10)
-  const databaseUrl = process.env.DATABASE_URL ?? "sqlite://./data/codebridge.db"
+  const databaseUrl = process.env.DATABASE_URL ?? "./data/codebridge.db"
   const redisUrl = process.env.REDIS_URL
   const queueMode = parseQueueMode(process.env.QUEUE_MODE, redisUrl)
   const configPath = process.env.CONFIG_PATH ?? resolveDefaultConfigPath()

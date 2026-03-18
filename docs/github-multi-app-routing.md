@@ -13,6 +13,7 @@ Initial customer-facing target:
 
 The bootstrap mention must be the real installed GitHub App handle.
 Do not rely on arbitrary text aliases for issue bootstrap.
+In this design, "real handle" means the exact `@<app-slug>` resolved from the GitHub App identity. GitHub may render that token as plain text instead of an inline mention link in the comment body, so CodeBridge validates exact slug text plus matching app authorship rather than UI highlighting.
 
 ## Config Shape
 
@@ -86,11 +87,9 @@ Base repo settings remain the default route. An app override only needs to speci
   - `/github/webhook/codex`
   - `/github/webhook/opencode`
 - Incoming event handling is scoped to that app key.
-- Mention prefixes are resolved from:
-  - app-level configured prefixes
-  - tenant binding prefixes
-  - GitHub App slug-derived default mention
-  - assignment assignee aliases
+- Comment-trigger routing accepts only the exact GitHub App slug-derived mention when the app identity can be resolved.
+- Configured `commandPrefixes` are fallback-only for degraded cases where GitHub App identity resolution is unavailable, and they must still equal the real slug.
+- `assignmentAssignees` apply to assignment bootstrap only; they do not widen accepted GitHub comment prefixes.
 
 ### Polling
 
@@ -159,12 +158,17 @@ This keeps existing deployments working while allowing a gradual move to named a
   - issue `dzianisv/codebridge-test#518`
   - resulting PR `dzianisv/codebridge-test#519`
   - persisted run status `succeeded` with `github_app_key=codex`
-- OpenCode route after backend-created-PR fix:
+- March 17, 2026 OpenCode route after backend-created-PR fix:
   - issue `dzianisv/codebridge-test#524`
   - resulting PR `dzianisv/codebridge-test#525`
   - persisted run `ZkkIiFQf` with status `succeeded`, `backend=opencode`, `github_app_key=opencode`, and `pr_url=https://github.com/dzianisv/codebridge-test/pull/525`
+- March 18, 2026 distinct-app hard-gate proof:
+  - Codex issue flow `dzianisv/codebridge-test#559`
+  - OpenCode issue-to-PR flow `dzianisv/codebridge-test#560` -> `#561`
+  - reply authors `codexengineer[bot]` and `opencodebridgeapp[bot]`
+  - OpenCode PR author `app/opencodebridgeapp`
 
-Those runs proved routing and backend selection.
-They did not prove distinct GitHub App identity unless the issue mention handle and final author login were also distinct.
+The March 17 runs proved routing and backend selection.
+The March 18 hard-gate run added distinct GitHub App identity proof.
 
 The live customer-flow evaluator now rejects shared app credentials so this ambiguity cannot be silently accepted again.

@@ -62,11 +62,11 @@ describe("loadEnv defaults", () => {
     expect(env.role).toBe("all")
   })
 
-  it("defaults databaseUrl to sqlite", async () => {
+  it("defaults databaseUrl to a plain SQLite path", async () => {
     delete process.env.DATABASE_URL
     const { loadEnv } = await import("./config.js")
     const env = loadEnv()
-    expect(env.databaseUrl).toBe("sqlite://./data/codebridge.db")
+    expect(env.databaseUrl).toBe("./data/codebridge.db")
   })
 
   it("defaults queueMode to memory when no REDIS_URL", async () => {

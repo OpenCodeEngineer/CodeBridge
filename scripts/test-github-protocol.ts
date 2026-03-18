@@ -574,19 +574,31 @@ const emitSyntheticDiscussionCommentWebhook = async (input: {
   })
 }
 
-const resolveSqlitePath = (databaseUrl: string): string | null => {
-  if (!databaseUrl.startsWith("sqlite://")) return null
-  const raw = databaseUrl.replace(/^sqlite:\/\//, "")
-  if (!raw) return null
+export const resolveSqliteFilePath = (databaseUrl: string): string | null => {
+  const trimmed = databaseUrl.trim()
+  if (!trimmed || trimmed === ":memory:") return null
+
+  let raw = ""
+  if (trimmed.startsWith("sqlite://")) {
+    raw = trimmed.replace(/^sqlite:\/\//, "")
+  } else if (trimmed.startsWith("sqlite:")) {
+    raw = trimmed.slice("sqlite:".length)
+  } else if (trimmed.toLowerCase().endsWith(".db")) {
+    raw = trimmed
+  } else {
+    return null
+  }
+
+  if (!raw || raw === ":memory:") return null
   return path.isAbsolute(raw) ? raw : path.join(process.cwd(), raw)
 }
 
-const resolveCandidateSqlitePaths = (databaseUrl: string): string[] => {
+export const resolveCandidateSqlitePaths = (databaseUrl: string): string[] => {
   const candidates = new Set<string>()
-  const fromInput = resolveSqlitePath(databaseUrl)
+  const fromInput = resolveSqliteFilePath(databaseUrl)
   if (fromInput) candidates.add(fromInput)
 
-  const fromProcessEnv = process.env.DATABASE_URL ? resolveSqlitePath(process.env.DATABASE_URL) : null
+  const fromProcessEnv = process.env.DATABASE_URL ? resolveSqliteFilePath(process.env.DATABASE_URL) : null
   if (fromProcessEnv) candidates.add(fromProcessEnv)
 
   try {
@@ -616,7 +628,7 @@ const waitForRunBySourceKey = async (input: {
 }) => {
   const sqlitePaths = resolveCandidateSqlitePaths(input.databaseUrl)
   if (sqlitePaths.length === 0) {
-    throw new Error(`Synthetic fallback requires sqlite DATABASE_URL, got: ${input.databaseUrl}`)
+    throw new Error(`Synthetic fallback requires a file-backed SQLite DATABASE_URL or .db path, got: ${input.databaseUrl}`)
   }
 
   const deadline = Date.now() + input.timeoutSec * 1000

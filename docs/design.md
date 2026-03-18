@@ -14,8 +14,10 @@ This design treats GitHub issue and PR conversation threads as the primary contr
    creates or resumes a run.
 2. Issue and PR conversation threads are marked managed (`agent:managed`).
 3. After that, plain human comments on the same managed issue or PR thread are interpreted as follow-up prompts only for the app that owns the latest run on that thread.
-4. PR review comments and discussion threads remain explicit-command surfaces; follow-up comments there still require mention/prefix.
+4. PR review comments and discussion threads remain explicit-command surfaces; follow-up comments there still require the exact app slug handle.
 5. Bridge executes the configured backend against the resolved local checkout and writes status/answers back to the originating GitHub thread.
+
+For GitHub comment routing, "real handle" means the exact `@<app-slug>` token resolved from the GitHub App identity (`GET /app`), not an arbitrary configured alias. GitHub may still render that token as plain text instead of an inline mention link in the issue body, so validity is defined by exact slug match plus matching app-authored response, not by UI highlighting alone. If GitHub App identity resolution is temporarily unavailable, CodeBridge may fall back to configured `commandPrefixes`, but those values must still equal the real slug exactly.
 
 ## Routing Rules
 
@@ -23,16 +25,16 @@ This design treats GitHub issue and PR conversation threads as the primary contr
 
 - Issue not managed:
   - accept assignment-trigger bootstrap
-  - accept app mention or configured explicit command prefix
+  - accept exact real GitHub App slug mention only
 - Issue or PR thread managed:
   - treat any non-bot comment as a follow-up prompt
   - still allow explicit control verbs (`status`, `pause`, `resume`)
 - PR review comment thread:
-  - require explicit app mention or configured prefix on every command
+  - require explicit exact real GitHub App slug mention on every command
   - accept `run`, `reply`, `status`, `pause`, and `resume`
   - post acknowledgements and final responses on the PR conversation thread
 - Discussion thread:
-  - require explicit app mention or configured prefix on every command
+  - require explicit exact real GitHub App slug mention on every command
   - accept `run` and `reply`
   - answer `status`, `pause`, and `resume` with an unsupported-surface comment
 
@@ -74,6 +76,7 @@ Backend dispatch happens only after this repo resolution completes. The selected
 - Poll state is app-specific to avoid collisions when the same repo is watched by multiple apps.
 - Run records persist `github.appKey`, and all outbound GitHub writes reuse that same app identity.
 - Explicit mention of a second app on a managed thread starts a new run for that app instead of relaying into the prior app’s session.
+- `assignmentAssignees` are assignment/bootstrap aids only. They must not widen the accepted comment mention prefixes on GitHub surfaces.
 
 ## Agent Backend Selection
 
@@ -174,7 +177,7 @@ Trade-off:
           |
           +--> thread is NOT managed?
           |        |
-          |        +--> require app mention/prefix
+          |        +--> require exact app slug mention
           |        |        |
           |        |        +--> no prefix => ignore
           |        |
@@ -217,7 +220,7 @@ Trade-off:
 5. Tests: verify assignment bootstrap (or blocked precondition), issue mention, PR conversation mention, PR review comment mention, discussion mention, managed plain comment, tenant override, control verbs, and status transitions.
  - Discussion threads:
    - accept app mention bootstrap
-   - require explicit mention/prefix for follow-up prompts
+   - require explicit exact app slug mention for follow-up prompts
    - no issue-label lifecycle writes (discussions do not support issue labels)
 
 ## Recent Findings

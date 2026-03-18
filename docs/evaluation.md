@@ -17,6 +17,7 @@ It is only valid when:
 - the two app keys resolve to distinct app ids, slugs, and bot authors.
 
 Shared credentials under two different `appKey` names are not accepted.
+For this gate, "real handle" means the exact `@<app-slug>` resolved from the GitHub App identity. GitHub may render that token as plain text instead of an inline mention link in the issue body, so the evaluator checks exact slug text plus matching app-authored responses rather than UI highlighting alone.
 
 1. `@<real-codex-app-slug>` issue flow
    - posts a GitHub issue command
@@ -66,7 +67,16 @@ The current gate would fail that behavior because the OpenCode case requires a r
 
 Promptfoo then uses `azure:chat:gpt-4.1` as the judge on the collected JSON evidence.
 
-Historical note:
+Latest passing distinct-app proof from this branch:
+
+- March 18, 2026 local hard-gate run:
+  - Codex issue flow: `dzianisv/codebridge-test#559`
+  - OpenCode issue-to-PR flow: `dzianisv/codebridge-test#560` -> `#561`
+  - Codex reply author: `codexengineer[bot]`
+  - OpenCode reply author: `opencodebridgeapp[bot]`
+  - OpenCode PR author: `app/opencodebridgeapp`
+
+Rejected historical note:
 
 - A March 18, 2026 local run produced route/backend evidence on `dzianisv/codebridge-test#542` and `dzianisv/codebridge-test#543` -> `#544`.
 - That run used one GitHub App author (`codexengineer[bot]`) for both routes, so it does **not** satisfy the distinct-app identity requirement.

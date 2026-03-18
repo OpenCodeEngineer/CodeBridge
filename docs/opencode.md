@@ -165,12 +165,19 @@ Validated on March 17, 2026:
   - run id: `ZkkIiFQf`
   - final status comment: `PR: https://github.com/dzianisv/codebridge-test/pull/525`
   - resulting PR: `dzianisv/codebridge-test#525`
-- Customer-flow hard-gate rerun after the clean-branch recovery fix:
+- Rejected distinct-app proof attempt:
   - issue: `dzianisv/codebridge-test#543`
   - run id: `g_uIe3gt`
-  - final status comment includes the PR URL plus command results for `bun test` and `bun run src/main.ts`
   - resulting PR: `dzianisv/codebridge-test#544`
-  - persisted result: `status=succeeded`, `backend=opencode`, `github_app_key=opencode`, `pr_url=https://github.com/dzianisv/codebridge-test/pull/544`
+  - this remained route/backend proof only because the final GitHub author was still `codexengineer[bot]`
+- Passing distinct-app hard-gate proof:
+  - issue: `dzianisv/codebridge-test#560`
+  - run id: `pguKDmKk`
+  - final status comment includes the PR URL plus command results for `bun test` and `bun run src/main.ts`
+  - resulting PR: `dzianisv/codebridge-test#561`
+  - final issue-thread bot author: `opencodebridgeapp[bot]`
+  - PR author: `app/opencodebridgeapp`
+  - persisted result: `status=succeeded`, `backend=opencode`, `github_app_key=opencode`, `pr_url=https://github.com/dzianisv/codebridge-test/pull/561`
 
 ## Tradeoffs
 

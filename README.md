@@ -189,13 +189,13 @@ secrets:
       privateKey: "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
       webhookSecret: "your-codex-webhook-secret"
       commandPrefixes:
-        - "your-real-codex-app-slug"      # real GitHub App slug, no arbitrary alias
+        - "your-real-codex-app-slug"      # optional fallback only; must equal the real GitHub App slug exactly
     opencode:
       appId: 234567
       privateKey: "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
       webhookSecret: "your-opencode-webhook-secret"
       commandPrefixes:
-        - "your-real-opencode-app-slug"   # real GitHub App slug, no arbitrary alias
+        - "your-real-opencode-app-slug"   # optional fallback only; must equal the real GitHub App slug exactly
 
 tenants:
   - id: local
@@ -362,6 +362,7 @@ That keeps repo mapping deterministic, but it also means one configured checkout
 ### Assignment bootstrap
 
 Assign the issue to a native assignable actor. Configure additional accepted handles with `github.assignmentAssignees`.
+Those assignment handles apply to assignment bootstrap only; they do not widen accepted comment mention prefixes.
 
 ### Mention bootstrap
 
@@ -378,8 +379,9 @@ If you run multiple apps on the same repo, mention the app you want:
 @your-real-opencode-app-slug run refactor this integration using the opencode backend
 ```
 
-The mention handle must be the real installed GitHub App slug.
-Do not rely on arbitrary text aliases for issue bootstrap.
+The mention handle must be the exact real installed GitHub App slug.
+Do not rely on arbitrary text aliases for GitHub comment bootstrap or explicit GitHub commands.
+GitHub may still render the exact app slug token as plain text instead of an inline mention link in the issue body, so validity is based on exact slug text plus matching app-authored response, not UI highlighting alone.
 
 ### Follow-up
 
@@ -387,7 +389,7 @@ On managed issues and PR conversation threads, plain non-bot comments are treate
 
 PR review comments stay explicit:
 
-- every review-thread follow-up must still mention the app or use a configured prefix
+- every review-thread follow-up must still mention the exact app slug handle
 - responses are written back to the PR conversation thread
 
 ### Control verbs
@@ -396,7 +398,7 @@ On managed issues and PR conversation threads, explicit `status`, `pause`, and `
 
 Discussion threads stay explicit:
 
-- every follow-up must still mention the app or use a configured prefix
+- every follow-up must still mention the exact app slug handle
 - `status`, `pause`, and `resume` return an unsupported-message comment instead of mutating issue state
 
 ## Evaluation
