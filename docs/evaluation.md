@@ -40,9 +40,12 @@ The suite does not trust GitHub comments alone.
 It checks three evidence layers:
 
 - GitHub-visible evidence
+  - trigger comment starts with the real GitHub App handle
   - issue URL
   - final bot comment URL
+  - final issue-thread bot author matches the expected app
   - PR URL
+  - PR author matches the expected app for the OpenCode route
   - PR body linkage
 - CodeBridge persistence
   - `backend`
@@ -133,6 +136,7 @@ Important:
 - the hard gate no longer accepts configured alias prefixes such as `@OpenCodeEvalApp`
 - it derives the real handles from the GitHub App slugs
 - it fails fast if Codex and OpenCode resolve to the same app id, slug, or bot login
+- it fails if the collected issue-thread authors or PR author do not match the expected real GitHub App bot
 
 ## Temporary Config Generator
 

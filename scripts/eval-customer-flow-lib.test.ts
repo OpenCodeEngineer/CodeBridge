@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest"
 import {
+  botLoginMatchesExpected,
   issueLinkMentioned,
   normalizeBotLogins,
+  textStartsWithHandle,
   textMentionsUrl,
   verifyKnowledgeResponse
 } from "./eval-customer-flow-lib.js"
@@ -57,6 +59,17 @@ describe("verifyKnowledgeResponse", () => {
   })
 })
 
+describe("botLoginMatchesExpected", () => {
+  it("accepts equivalent bot-login variants", () => {
+    expect(botLoginMatchesExpected("codexengineer[bot]", "codexengineer")).toBe(true)
+    expect(botLoginMatchesExpected("app/codexengineer", "codexengineer[bot]")).toBe(true)
+  })
+
+  it("rejects different GitHub App authors", () => {
+    expect(botLoginMatchesExpected("codexengineer[bot]", "opencodeengineer[bot]")).toBe(false)
+  })
+})
+
 describe("issueLinkMentioned", () => {
   it("accepts standard closing keywords", () => {
     expect(issueLinkMentioned("Closes #42", 42)).toBe(true)
@@ -73,5 +86,12 @@ describe("textMentionsUrl", () => {
   it("checks whether the final GitHub reply surfaced the PR url", () => {
     expect(textMentionsUrl("PR: https://github.com/acme/repo/pull/5", "https://github.com/acme/repo/pull/5")).toBe(true)
     expect(textMentionsUrl("No PR here", "https://github.com/acme/repo/pull/5")).toBe(false)
+  })
+})
+
+describe("textStartsWithHandle", () => {
+  it("requires the real GitHub App handle at the start of the command", () => {
+    expect(textStartsWithHandle("@codexengineer run fix the bug", "@codexengineer")).toBe(true)
+    expect(textStartsWithHandle("@OpenCodeEvalApp run fix the bug", "@opencodeengineer")).toBe(false)
   })
 })

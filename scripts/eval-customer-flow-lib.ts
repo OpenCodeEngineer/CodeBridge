@@ -6,6 +6,8 @@ export type KnowledgeVerification = {
   unexpectedPr: boolean
 }
 
+const GITHUB_HANDLE_RE = /^[A-Za-z0-9-]+$/
+
 export function normalizeBotLogins(raw: string): string[] {
   const seed = raw
     .split(",")
@@ -41,6 +43,16 @@ export function verifyKnowledgeResponse(botResponse: string, prUrl?: string | nu
   }
 }
 
+export function botLoginMatchesExpected(actual: string | undefined, expected: string | string[]): boolean {
+  if (!actual?.trim()) return false
+  const actualVariants = normalizeBotLogins(actual)
+  if (actualVariants.length === 0) return false
+
+  const expectedValues = Array.isArray(expected) ? expected : [expected]
+  const allowed = new Set(expectedValues.flatMap(value => normalizeBotLogins(value)))
+  return actualVariants.some(value => allowed.has(value))
+}
+
 export function issueLinkMentioned(prBody: string | undefined, issueNumber: number): boolean {
   if (!prBody?.trim()) return false
   const normalized = prBody.toLowerCase()
@@ -54,4 +66,19 @@ export function issueLinkMentioned(prBody: string | undefined, issueNumber: numb
 export function textMentionsUrl(text: string, url: string | undefined): boolean {
   if (!url?.trim()) return false
   return text.includes(url.trim())
+}
+
+export function textStartsWithHandle(text: string, handle: string): boolean {
+  const normalizedHandle = normalizeHandle(handle)
+  if (!normalizedHandle) return false
+  const normalizedText = text.trimStart().toLowerCase()
+  return normalizedText === normalizedHandle || normalizedText.startsWith(`${normalizedHandle} `) || normalizedText.startsWith(`${normalizedHandle}\n`)
+}
+
+function normalizeHandle(value: string | undefined): string | null {
+  const raw = (value ?? "").trim()
+  if (!raw) return null
+  const trimmed = raw.startsWith("@") ? raw.slice(1) : raw
+  if (!trimmed || !GITHUB_HANDLE_RE.test(trimmed)) return null
+  return `@${trimmed.toLowerCase()}`
 }

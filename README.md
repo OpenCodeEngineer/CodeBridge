@@ -421,7 +421,7 @@ It proves two user-facing GitHub flows end to end:
 
 It verifies:
 
-- GitHub-visible evidence: issue comment URL and PR URL
+- GitHub-visible evidence: the trigger comment used the real handle, the expected bot replied on the issue thread, and the OpenCode PR author matches the expected app
 - persistence evidence: `backend`, `github_app_key`, and final run status from the live bridge database
 - executable PR verification: `bun test` and `bun run src/main.ts` on the generated PR branch
 - branch-ahead recovery: OpenCode is allowed to commit and push before CodeBridge inspects git state, and the bridge must still recover the PR flow instead of misclassifying the run as `no_changes`

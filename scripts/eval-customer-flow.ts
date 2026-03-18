@@ -7,9 +7,11 @@ import path from "node:path"
 import Database from "better-sqlite3"
 import { Pool } from "pg"
 import {
+  botLoginMatchesExpected,
   issueLinkMentioned,
   normalizeBotLogins,
   textMentionsUrl,
+  textStartsWithHandle,
   verifyKnowledgeResponse,
   type KnowledgeVerification
 } from "./eval-customer-flow-lib.js"
@@ -42,6 +44,7 @@ type MissionCaseDefinition = {
   title: string
   appHandle: string
   appKey: string
+  expectedBotLogin: string
   botLogins: string[]
   expectedBackend: AgentBackend
   issueBody: string
@@ -58,6 +61,7 @@ type IssueRef = {
 type IssueCommentRef = {
   id: number
   url: string
+  body: string
 }
 
 type BotComment = {
@@ -117,13 +121,19 @@ type CaseCollected = {
   issueUrl: string
   issueNumber: number
   appHandle: string
+  triggerCommentUrl: string
+  triggerCommentUsesExpectedHandle: boolean
   expectedBackend: AgentBackend
   expectedAppKey: string
+  expectedBotLogin: string
+  expectedBotLogins: string[]
   task: string
   timedOut: boolean
   botStarted: boolean
   botCompleted: boolean
   botCommentUrls: string[]
+  botCommentAuthorLogins: string[]
+  botCommentAuthorsMatchExpected: boolean
   latestBotCommentUrl?: string
   botResponse: string
   labels: string[]
@@ -131,6 +141,7 @@ type CaseCollected = {
   linkedPrNumber?: number
   linkedPrTitle?: string
   linkedPrAuthorLogin?: string
+  linkedPrAuthorMatchesExpectedBot?: boolean
   linkedPrBody?: string
   dbRun?: DbRunEvidence | null
   knowledgeVerification?: KnowledgeVerification
@@ -304,10 +315,11 @@ function postIssueComment(repo: string, issueNumber: number, body: string): Issu
   const parsed = JSON.parse((result.stdout || "").trim()) as { id?: number; html_url?: string }
   const id = Number(parsed.id)
   const url = parsed.html_url ?? `https://github.com/${repo}/issues/${issueNumber}`
+  const body = typeof (parsed as { body?: string }).body === "string" ? (parsed as { body?: string }).body ?? "" : ""
   if (!id) {
     throw new Error(`gh issue comment returned invalid response: ${(result.stdout || "").trim()}`)
   }
-  return { id, url }
+  return { id, url, body }
 }
 
 function listIssueComments(repo: string, issueNumber: number): BotComment[] {
@@ -680,6 +692,7 @@ function buildMissionCases(args: Args): MissionCaseDefinition[] {
       title: "Codex issue flow answers the GPT-1 release question",
       appHandle: args.codexHandle,
       appKey: args.codexAppKey,
+      expectedBotLogin: args.codexBotLogin ?? "",
       botLogins: normalizeBotLogins(args.codexBotLogin),
       expectedBackend: "codex",
       issueBody: [
@@ -715,6 +728,7 @@ function buildMissionCases(args: Args): MissionCaseDefinition[] {
       title: "OpenCode issue flow creates a Bun TypeScript PR",
       appHandle: args.opencodeHandle,
       appKey: args.opencodeAppKey,
+      expectedBotLogin: args.opencodeBotLogin ?? "",
       botLogins: normalizeBotLogins(args.opencodeBotLogin),
       expectedBackend: "opencode",
       issueBody: [
@@ -782,7 +796,23 @@ function buildEvalTests(results: CaseCollected[]) {
         type: "javascript",
         value: [
           "const obj = JSON.parse(output);",
+          "return obj.triggerCommentUsesExpectedHandle === true;"
+        ].join("\n")
+      },
+      {
+        type: "javascript",
+        value: [
+          "const obj = JSON.parse(output);",
           "return obj.timedOut === false && obj.botCompleted === true;"
+        ].join("\n")
+      },
+      {
+        type: "javascript",
+        value: [
+          "const obj = JSON.parse(output);",
+          "return Array.isArray(obj.botCommentAuthorLogins)",
+          "&& obj.botCommentAuthorLogins.length > 0",
+          "&& obj.botCommentAuthorsMatchExpected === true;"
         ].join("\n")
       },
       {
@@ -827,6 +857,7 @@ function buildEvalTests(results: CaseCollected[]) {
           value: [
             "const obj = JSON.parse(output);",
             "return obj.prVerification",
+            "&& obj.linkedPrAuthorMatchesExpectedBot === true",
             "&& obj.prVerification.hasExpectedFiles === true",
             "&& obj.prVerification.helloFileHasExpectedString === true",
             "&& obj.prVerification.prBodyLinksIssue === true",
@@ -851,6 +882,47 @@ function buildEvalTests(results: CaseCollected[]) {
       assert: assertions
     }
   })
+}
+
+function assertCollectedIdentityEvidence(results: CaseCollected[]) {
+  const handleOwners = new Map<string, string>()
+  const botOwners = new Map<string, string>()
+
+  for (const entry of results) {
+    const normalizedHandle = entry.appHandle.trim().toLowerCase()
+    const existingHandleOwner = handleOwners.get(normalizedHandle)
+    if (existingHandleOwner && existingHandleOwner !== entry.caseId) {
+      throw new Error(
+        `Hard-gate eval requires distinct real GitHub App handles per route. Both ${existingHandleOwner} and ${entry.caseId} used ${entry.appHandle}.`
+      )
+    }
+    handleOwners.set(normalizedHandle, entry.caseId)
+
+    const normalizedBot = entry.expectedBotLogin.trim().toLowerCase()
+    const existingBotOwner = botOwners.get(normalizedBot)
+    if (existingBotOwner && existingBotOwner !== entry.caseId) {
+      throw new Error(
+        `Hard-gate eval requires distinct real GitHub App bot authors per route. Both ${existingBotOwner} and ${entry.caseId} used ${entry.expectedBotLogin}.`
+      )
+    }
+    botOwners.set(normalizedBot, entry.caseId)
+
+    if (!entry.triggerCommentUsesExpectedHandle) {
+      throw new Error(`Hard-gate eval requires the real GitHub App handle in the trigger comment for ${entry.caseId}.`)
+    }
+
+    if (!entry.botCommentAuthorsMatchExpected || entry.botCommentAuthorLogins.length === 0) {
+      throw new Error(
+        `Hard-gate eval requires issue-thread replies from ${entry.expectedBotLogin} for ${entry.caseId}, got ${entry.botCommentAuthorLogins.join(", ") || "none"}.`
+      )
+    }
+
+    if (entry.linkedPrUrl && entry.linkedPrAuthorMatchesExpectedBot !== true) {
+      throw new Error(
+        `Hard-gate eval requires PR ${entry.linkedPrUrl} to be authored by ${entry.expectedBotLogin}, got ${entry.linkedPrAuthorLogin ?? "unknown"}.`
+      )
+    }
+  }
 }
 
 function parsePromptfooCounts(payload: any): { passed: number; failed: number; errors: number } {
@@ -950,7 +1022,8 @@ async function main() {
     )
     const task = missionCase.buildTask(issue.number)
     const commandBody = `${missionCase.appHandle} run Please solve this issue exactly as written below.\n\n${task}`
-    const triggerCommentIds: number[] = [postIssueComment(args.repo, issue.number, commandBody).id]
+    const triggerComment = postIssueComment(args.repo, issue.number, commandBody)
+    const triggerCommentIds: number[] = [triggerComment.id]
 
     const bot = await waitForBot({
       repo: args.repo,
@@ -977,7 +1050,15 @@ async function main() {
     const botCommentUrls = bot.comments.map(comment => {
       return `https://github.com/${args.repo}/issues/${issue.number}#issuecomment-${comment.id}`
     })
+    const botCommentAuthorLogins = [...new Set(
+      bot.comments
+        .map(comment => comment.user?.login?.trim())
+        .filter((value): value is string => Boolean(value))
+    )]
     const latestBotCommentUrl = botCommentUrls[botCommentUrls.length - 1]
+    const linkedPrAuthorMatchesExpectedBot = linkedPr?.url
+      ? botLoginMatchesExpected(prDetails?.authorLogin, missionCase.botLogins)
+      : undefined
 
     collected.push({
       caseId: missionCase.id,
@@ -985,13 +1066,21 @@ async function main() {
       issueUrl: issue.url,
       issueNumber: issue.number,
       appHandle: missionCase.appHandle,
+      triggerCommentUrl: triggerComment.url,
+      triggerCommentUsesExpectedHandle: textStartsWithHandle(triggerComment.body || commandBody, missionCase.appHandle),
       expectedBackend: missionCase.expectedBackend,
       expectedAppKey: missionCase.appKey,
+      expectedBotLogin: missionCase.expectedBotLogin,
+      expectedBotLogins: missionCase.botLogins,
       task,
       timedOut: bot.timedOut,
       botStarted: bot.started,
       botCompleted: bot.completed,
       botCommentUrls,
+      botCommentAuthorLogins,
+      botCommentAuthorsMatchExpected:
+        botCommentAuthorLogins.length > 0
+        && botCommentAuthorLogins.every(login => botLoginMatchesExpected(login, missionCase.botLogins)),
       latestBotCommentUrl,
       botResponse: bot.combined,
       labels,
@@ -999,6 +1088,7 @@ async function main() {
       linkedPrNumber: linkedPr?.number,
       linkedPrTitle: prDetails?.title,
       linkedPrAuthorLogin: prDetails?.authorLogin,
+      linkedPrAuthorMatchesExpectedBot,
       linkedPrBody: prDetails?.body,
       dbRun,
       knowledgeVerification:
@@ -1020,6 +1110,8 @@ async function main() {
 
     cleanRepo(args.repoPath)
   }
+
+  assertCollectedIdentityEvidence(collected)
 
   const tests = buildEvalTests(collected)
   const promptfooConfig = {

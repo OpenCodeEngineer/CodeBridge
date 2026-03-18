@@ -32,6 +32,15 @@ describe("assertDistinctEvalGithubApps", () => {
       })
     ).toThrow(/distinct GitHub App slugs/)
   })
+
+  it("rejects shared bot authors", () => {
+    expect(() =>
+      assertDistinctEvalGithubApps({
+        codex: { key: "codex", appId: 1, slug: "codexengineer", botLogin: "shared[bot]" },
+        opencode: { key: "opencode", appId: 2, slug: "opencodeengineer", botLogin: "shared[bot]" }
+      })
+    ).toThrow(/distinct GitHub App bot authors/)
+  })
 })
 
 describe("resolveExpectedHandle", () => {
