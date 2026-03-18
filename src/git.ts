@@ -21,6 +21,15 @@ export async function currentBranch(cwd: string): Promise<string> {
   return branch
 }
 
+export async function countCommitsAhead(cwd: string, baseRef: string): Promise<number> {
+  const output = await git(["rev-list", "--count", `${baseRef}..HEAD`], cwd)
+  const parsed = Number.parseInt(output, 10)
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Unable to parse commit distance for ${baseRef}: ${JSON.stringify(output)}`)
+  }
+  return parsed
+}
+
 export async function fetchOrigin(cwd: string): Promise<void> {
   await git(["fetch", "origin"], cwd)
 }

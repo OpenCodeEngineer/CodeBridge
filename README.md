@@ -343,7 +343,7 @@ CodeBridge currently executes against the configured local checkout path. It doe
 Backend behavior:
 
 - `codex`: CodeBridge starts a local Codex SDK thread in `repo.path`.
-- `opencode`: CodeBridge still prepares the git branch locally, then creates an OpenCode session over HTTP and scopes that session to the same `repo.path`. If OpenCode returns a GitHub PR URL after leaving the checkout clean, CodeBridge records that PR as the successful run outcome instead of downgrading the run to `no_changes`.
+- `opencode`: CodeBridge still prepares the git branch locally, then creates an OpenCode session over HTTP and scopes that session to the same `repo.path`. If OpenCode leaves the checkout clean, CodeBridge does not assume `no_changes`: it first looks for a returned PR URL, then checks whether the prepared branch is ahead of the remote base branch, pushes that branch if needed, reuses an already-open PR for that head branch, or creates the PR itself.
 
 Before starting a run, the worker:
 
@@ -351,7 +351,9 @@ Before starting a run, the worker:
 2. fetches `origin`,
 3. creates a fresh branch from the remote default branch,
 4. runs the selected backend in that checkout,
-5. commits and pushes from that same checkout, unless the backend already completed the PR flow and returned a GitHub PR URL.
+5. if the backend left uncommitted changes, CodeBridge commits and pushes them from that same checkout,
+6. if the backend left a clean branch with commits, CodeBridge still pushes/reuses/creates the PR from that branch instead of reporting `no_changes`,
+7. if the backend already completed the PR flow and returned a GitHub PR URL, CodeBridge records that PR as the successful outcome.
 
 That keeps repo mapping deterministic, but it also means one configured checkout is one mutable execution target. If you need stronger isolation or parallelism for the same GitHub repo, provide separate local clones or worktrees as separate configured `repo.path` targets.
 
@@ -398,13 +400,32 @@ Discussion threads stay explicit:
 
 ### Hard gate
 
-Runs the required live evaluation suite, including the direct assignment-without-mention case:
+Runs the required live customer-flow mission gate:
 
 ```bash
-bun scripts/eval-openclaw.ts --repo dzianisv/codebridge-test --timeout 180 --poll 10
+pnpm eval:customer-flow -- \
+  --repo dzianisv/codebridge-test \
+  --repo-path /absolute/path/to/dedicated/codebridge-test-clone \
+  --database-url sqlite:///absolute/path/to/codebridge-eval.db
 ```
 
-Native-Codex assignment run:
+This suite proves two user-facing GitHub flows end to end:
+
+- `@CodexApp` routes to backend `codex` and answers the GPT-1 release question on the issue thread with no PR.
+- `@OpenCodeApp` routes to backend `opencode`, creates a Bun + TypeScript hello-world app, runs it, opens a PR, and reports the PR back on the issue thread.
+
+It verifies:
+
+- GitHub-visible evidence: issue comment URL and PR URL
+- persistence evidence: `backend`, `github_app_key`, and final run status from the live bridge database
+- executable PR verification: `bun test` and `bun run src/main.ts` on the generated PR branch
+- branch-ahead recovery: OpenCode is allowed to commit and push before CodeBridge inspects git state, and the bridge must still recover the PR flow instead of misclassifying the run as `no_changes`
+
+Full design and workflow details live in [docs/evaluation.md](/Users/engineer/workspace/CodeBridge/docs/evaluation.md).
+
+### Legacy assignment gate
+
+Informational native-Codex assignment run:
 
 ```bash
 pnpm eval:codex-native
@@ -487,6 +508,7 @@ pnpm test:vibe-agents
 
 - [Requirements](docs/requirements.md)
 - [Design](docs/design.md)
+- [Customer-Flow Evaluation](docs/evaluation.md)
 - [OpenCode Backend Design](docs/opencode.md)
 - [GitHub Surface Test Protocol](docs/test-protocol.md)
 - [GitHub Assignee Setup](docs/github-assignee-setup.md)

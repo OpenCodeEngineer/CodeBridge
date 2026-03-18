@@ -24,6 +24,7 @@
     "eval:requirements": "env -u GITHUB_TOKEN -u AZURE_OPENAI_BASE_URL promptfoo eval --config promptfooconfig-requirements.yaml",
     "eval:requirements:serial": "env -u GITHUB_TOKEN -u AZURE_OPENAI_BASE_URL promptfoo eval --config promptfooconfig-requirements.yaml -j 1",
     "eval:view": "promptfoo view",
+    "eval:customer-flow": "tsx scripts/eval-customer-flow.ts --repo dzianisv/codebridge-test",
     "eval:strict-codexengineer": "bun scripts/eval-openclaw.ts --app-handle @codexengineer --assignment-handle @codexengineer",
     "eval:codex-native": "bun scripts/eval-openclaw.ts --app-handle @codexengineer --assignment-handle @openai-code-agent"
   },

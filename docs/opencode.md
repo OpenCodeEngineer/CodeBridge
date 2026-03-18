@@ -15,7 +15,12 @@ CodeBridge keeps ownership of GitHub routing, tenant/repo resolution, status pos
 
 OpenCode is used as the execution backend over HTTP.
 
-CodeBridge still prefers to own commit/push/PR creation when the checkout is dirty after the backend finishes. However, live validation showed that OpenCode can sometimes finish the git/PR flow itself and return a GitHub PR URL while leaving the checkout clean. The runner now treats that returned PR URL as authoritative success instead of incorrectly marking the run `no_changes`.
+CodeBridge still prefers to own commit/push/PR creation when the checkout is dirty after the backend finishes. However, live validation showed two clean-checkout success modes that must not be downgraded to `no_changes`:
+
+- OpenCode can finish the git/PR flow itself and return a GitHub PR URL.
+- OpenCode can commit and even push the prepared branch itself, while leaving the checkout clean and omitting the PR URL.
+
+The runner now treats a returned PR URL as authoritative success, and it also checks whether the prepared branch is ahead of the remote base branch before deciding the run had no changes.
 
 That means a GitHub issue assignment or mention is mapped like this:
 
@@ -44,7 +49,8 @@ For a repo configured with `backend: opencode`, the runner does this:
 5. call the OpenCode server using the resolved checkout path
 6. wait for the assistant to finish
 7. if the checkout is dirty, commit, push, and open a PR from the same local checkout
-8. if the checkout is already clean but the assistant response contains a GitHub PR URL, persist that PR URL and mirror it back to the originating GitHub thread as the successful outcome
+8. if the checkout is already clean but the prepared branch is ahead of `origin/<base>`, push that branch, reuse an existing open PR for it if one already exists, otherwise create the PR
+9. if the checkout is already clean and the assistant response contains a GitHub PR URL, persist that PR URL and mirror it back to the originating GitHub thread as the successful outcome
 
 The current integration does not ask OpenCode to create or manage worktrees. CodeBridge continues to use the configured checkout path directly.
 
@@ -145,6 +151,7 @@ Validated on March 17, 2026:
 - The adapter successfully created a session, delegated a repo mutation, and collected the assistant response.
 - OpenCode can complete a task with tool-only terminal output. CodeBridge now issues a summary follow-up in the same session when that happens so GitHub still gets a human-readable final message.
 - OpenCode can also create and open a PR itself before CodeBridge checks git status. The runner now parses a returned GitHub PR URL and records the run as `succeeded` even when the checkout is already clean.
+- A March 18, 2026 live eval failure on `dzianisv/codebridge-test#536` showed another edge case: OpenCode committed and pushed branch `opencodeapp-guzqj7ve` without returning a PR URL, leaving the checkout clean while the branch was still ahead of `main` by one commit. The runner now checks branch-ahead state and recovers the PR flow instead of misclassifying that run as `no_changes`.
 - Live runs produced transient untracked artifacts such as `.reflection/`, `.tts/`, and `.tts-debug.log`. CodeBridge now ignores those during dirty checks and unstages them before commit so PRs only include requested changes.
 - Status polling can lag slightly behind the terminal assistant output. The adapter now tolerates status polling failures after a terminal assistant message has already been observed.
 - Customer-flow rerun evidence after the backend-created-PR fix:
@@ -152,6 +159,12 @@ Validated on March 17, 2026:
   - run id: `ZkkIiFQf`
   - final status comment: `PR: https://github.com/dzianisv/codebridge-test/pull/525`
   - resulting PR: `dzianisv/codebridge-test#525`
+- Customer-flow hard-gate rerun after the clean-branch recovery fix:
+  - issue: `dzianisv/codebridge-test#543`
+  - run id: `g_uIe3gt`
+  - final status comment includes the PR URL plus command results for `bun test` and `bun run src/main.ts`
+  - resulting PR: `dzianisv/codebridge-test#544`
+  - persisted result: `status=succeeded`, `backend=opencode`, `github_app_key=opencode`, `pr_url=https://github.com/dzianisv/codebridge-test/pull/544`
 
 ## Tradeoffs
 

@@ -13,7 +13,16 @@ import { formatGitHubStatus, formatSlackStatus, formatFinalSummary } from "./sta
 import { updateSlackStatus, postSlackStatus } from "./slack.js"
 import { syncIssueLifecycleState } from "./github-issue-state.js"
 import { isDiscussionSourceKey, postDiscussionCommentFromContext } from "./github-discussions.js"
-import { isDirty, fetchOrigin, createBranch, commitAll, pushBranch, getDefaultBranchFromOrigin } from "./git.js"
+import {
+  countCommitsAhead,
+  currentBranch,
+  isDirty,
+  fetchOrigin,
+  createBranch,
+  commitAll,
+  pushBranch,
+  getDefaultBranchFromOrigin
+} from "./git.js"
 import { logger } from "./logger.js"
 import type { VibeAgentsSink } from "./vibe-agents.js"
 import { createGitHubInstallationClientFactory, type GitHubAppMap } from "./github-apps.js"
@@ -118,29 +127,91 @@ export function createRunner(params: {
       await updateStatus("running")
 
       const prompt = buildPrompt(run)
-      const finalResponse = await executeRunTurn({
+      const rawFinalResponse = await executeRunTurn({
         run,
         prompt,
         tracker,
         appendRunEvent,
         env
       })
+      const finalResponse = normalizeFinalResponseForDelivery(run, rawFinalResponse)
 
       const backendCreatedPr = extractPullRequestReference(finalResponse)
       const hasChanges = await isDirty(run.repoPath)
+      const commitsAhead = await countCommitsAhead(run.repoPath, `origin/${baseBranch}`)
       if (!hasChanges) {
         if (backendCreatedPr) {
-          await store.updateRunPr(run.id, backendCreatedPr.number, backendCreatedPr.url)
-          await store.updateRunStatus(run.id, "succeeded")
-          void vibeAgents?.sendRunStatus(run, "succeeded", {
-            summary: finalResponse.trim() || "Completed",
-            prUrl: backendCreatedPr.url
+          await completeWithPr({
+            run,
+            pr: backendCreatedPr,
+            finalResponse,
+            updateStatus,
+            githubClient,
+            slackClient,
+            discussionTarget,
+            store,
+            vibeAgents
           })
-          if (run.github && githubClient && !discussionTarget) {
-            await syncIssueLifecycleState(githubClient, run.github, "completed")
+          return
+        }
+
+        if (commitsAhead > 0) {
+          if (!run.github || !githubClient) {
+            await store.updateRunStatus(run.id, "failed")
+            void vibeAgents?.sendRunStatus(run, "failed", {
+              summary: "Missing GitHub context for PR creation"
+            })
+            if (run.github && githubClient && !discussionTarget) {
+              await syncIssueLifecycleState(githubClient, run.github, "idle")
+            }
+            const message = formatFinalSummary(run, "Missing GitHub context for PR creation", undefined)
+            await finalize(run, "failed", message, updateStatus, githubClient, slackClient)
+            return
           }
-          const message = formatFinalSummary(run, finalResponse || "Completed", backendCreatedPr.url)
-          await finalize(run, "succeeded", message, updateStatus, githubClient, slackClient)
+
+          const headBranch = await resolveHeadBranch(run.repoPath, branchName)
+          if (headBranch !== branchName) {
+            await store.updateRunBranch(run.id, headBranch)
+          }
+
+          const remoteUrl = buildRemoteUrl(run, githubClient.token)
+          await pushBranch(run.repoPath, remoteUrl, headBranch)
+
+          const existingPr = await findExistingPullRequestForBranch(githubClient, run, headBranch)
+          if (existingPr) {
+            await completeWithPr({
+              run,
+              pr: existingPr,
+              finalResponse,
+              updateStatus,
+              githubClient,
+              slackClient,
+              discussionTarget,
+              store,
+              vibeAgents
+            })
+            return
+          }
+
+          const pr = await githubClient.octokit.pulls.create({
+            owner: run.github.owner,
+            repo: run.github.repo,
+            title: buildPrTitle(run),
+            head: headBranch,
+            base: baseBranch,
+            body: buildPrBody(run, finalResponse, discussionTarget)
+          })
+          await completeWithPr({
+            run,
+            pr: { number: pr.data.number, url: pr.data.html_url },
+            finalResponse,
+            updateStatus,
+            githubClient,
+            slackClient,
+            discussionTarget,
+            store,
+            vibeAgents
+          })
           return
         }
 
@@ -185,17 +256,17 @@ export function createRunner(params: {
         body: buildPrBody(run, finalResponse, discussionTarget)
       })
 
-      await store.updateRunPr(run.id, pr.data.number, pr.data.html_url)
-      await store.updateRunStatus(run.id, "succeeded")
-      void vibeAgents?.sendRunStatus(run, "succeeded", {
-        summary: finalResponse || "Completed",
-        prUrl: pr.data.html_url
+      await completeWithPr({
+        run,
+        pr: { number: pr.data.number, url: pr.data.html_url },
+        finalResponse,
+        updateStatus,
+        githubClient,
+        slackClient,
+        discussionTarget,
+        store,
+        vibeAgents
       })
-      if (!discussionTarget) {
-        await syncIssueLifecycleState(githubClient, run.github, "completed")
-      }
-      const message = formatFinalSummary(run, finalResponse || "Completed", pr.data.html_url)
-      await finalize(run, "succeeded", message, updateStatus, githubClient, slackClient)
     } catch (error) {
       const runError = error instanceof Error && error.name === "AbortError"
         ? new Error(`${getRunBackendLabel(run)} run timed out after ${Math.round(runTurnTimeoutMs / 1000)}s`)
@@ -426,7 +497,20 @@ async function prepareRepo(run: RunRecord, baseBranch: string, branchName: strin
 function buildPrompt(run: RunRecord): string {
   const issueTitle = run.github?.issueTitle ? `Issue: ${run.github.issueTitle}` : ""
   const issueBody = run.github?.issueBody ? `\n${run.github.issueBody}` : ""
-  return [issueTitle + issueBody, run.prompt].filter(Boolean).join("\n\n")
+  return [issueTitle + issueBody, run.prompt, buildGitHubResponseContract(run)].filter(Boolean).join("\n\n")
+}
+
+function buildGitHubResponseContract(run: RunRecord): string {
+  if (!run.github) return ""
+  return [
+    "Final response contract:",
+    "- Do not use gh or GitHub APIs/CLI to post back to GitHub. CodeBridge will publish your final assistant response to the originating thread.",
+    "- Write the final answer so it can be posted to GitHub unchanged.",
+    "- For knowledge questions, answer the question directly instead of saying 'comment to post' or describing what you would have posted.",
+    "- If you ran important commands or tests, include a 'Command results' section with the command and whether it passed.",
+    "- If a PR exists, include the full GitHub PR URL in the final response.",
+    "- Do not mention an inability to comment on GitHub unless the user explicitly asked you to use GitHub tooling from inside the task."
+  ].join("\n")
 }
 
 function buildOpenCodeSessionTitle(run: RunRecord): string {
@@ -457,6 +541,73 @@ function buildPrTitle(run: RunRecord): string {
 function buildPrBody(run: RunRecord, summary: string, discussionTarget: boolean): string {
   const issue = run.github?.issueNumber && !discussionTarget ? `Closes #${run.github.issueNumber}` : ""
   return [issue, summary].filter(Boolean).join("\n\n")
+}
+
+function normalizeFinalResponseForDelivery(run: RunRecord, finalResponse: string): string {
+  const trimmed = finalResponse.trim()
+  if (!run.github || !trimmed) return trimmed
+
+  const commentBlockMatch = trimmed.match(/comment to post(?: on the issue)?\s*[:\-]?\s*```(?:text)?\n([\s\S]*?)```/i)
+  if (commentBlockMatch?.[1]?.trim()) {
+    return commentBlockMatch[1].trim()
+  }
+
+  return trimmed
+}
+
+async function resolveHeadBranch(repoPath: string, fallbackBranch: string): Promise<string> {
+  try {
+    const branch = await currentBranch(repoPath)
+    return branch && branch !== "HEAD" ? branch : fallbackBranch
+  } catch {
+    return fallbackBranch
+  }
+}
+
+async function findExistingPullRequestForBranch(
+  githubClient: any,
+  run: RunRecord,
+  headBranch: string
+): Promise<{ number: number; url: string } | null> {
+  if (!run.github) return null
+  const existing = await githubClient.octokit.pulls.list({
+    owner: run.github.owner,
+    repo: run.github.repo,
+    state: "open",
+    head: `${run.github.owner}:${headBranch}`,
+    per_page: 1
+  })
+  const pr = existing.data[0]
+  if (!pr) return null
+  return {
+    number: pr.number,
+    url: pr.html_url
+  }
+}
+
+async function completeWithPr(params: {
+  run: RunRecord
+  pr: { number: number; url: string }
+  finalResponse: string
+  updateStatus: (state: string) => Promise<void>
+  githubClient: any
+  slackClient?: WebClient
+  discussionTarget: boolean
+  store: RunStore
+  vibeAgents?: VibeAgentsSink
+}) {
+  const summary = params.finalResponse.trim() || "Completed"
+  await params.store.updateRunPr(params.run.id, params.pr.number, params.pr.url)
+  await params.store.updateRunStatus(params.run.id, "succeeded")
+  void params.vibeAgents?.sendRunStatus(params.run, "succeeded", {
+    summary,
+    prUrl: params.pr.url
+  })
+  if (params.run.github && params.githubClient && !params.discussionTarget) {
+    await syncIssueLifecycleState(params.githubClient, params.run.github, "completed")
+  }
+  const message = formatFinalSummary(params.run, summary, params.pr.url)
+  await finalize(params.run, "succeeded", message, params.updateStatus, params.githubClient, params.slackClient)
 }
 
 async function finalize(

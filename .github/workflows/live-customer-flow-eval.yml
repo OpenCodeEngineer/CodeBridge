@@ -1,0 +1,188 @@
+name: Live Customer Flow Eval
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 8 * * *"
+
+concurrency:
+  group: live-customer-flow-eval
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  live-eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      GH_TOKEN: ${{ secrets.CODEBRIDGE_EVAL_GH_TOKEN }}
+      CODEBRIDGE_EVAL_GITHUB_APP_ID: ${{ secrets.CODEBRIDGE_EVAL_GITHUB_APP_ID }}
+      CODEBRIDGE_EVAL_GITHUB_PRIVATE_KEY: ${{ secrets.CODEBRIDGE_EVAL_GITHUB_PRIVATE_KEY }}
+      CODEBRIDGE_EVAL_GITHUB_INSTALLATION_ID: ${{ secrets.CODEBRIDGE_EVAL_GITHUB_INSTALLATION_ID }}
+      CODEBRIDGE_EVAL_CODEX_API_KEY: ${{ secrets.CODEBRIDGE_EVAL_CODEX_API_KEY }}
+      AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+      AZURE_OPENAI_BASE_URL: ${{ secrets.AZURE_OPENAI_BASE_URL }}
+      AZURE_RESOURCE_NAME: ${{ secrets.AZURE_RESOURCE_NAME }}
+      CODEBRIDGE_EVAL_REPO: dzianisv/codebridge-test
+      CODEBRIDGE_EVAL_CODEX_PREFIX: CodexApp
+      CODEBRIDGE_EVAL_OPENCODE_PREFIX: OpenCodeApp
+      CODEBRIDGE_EVAL_OPENCODE_MODEL: azure/gpt-4.1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          required=(
+            GH_TOKEN
+            CODEBRIDGE_EVAL_GITHUB_APP_ID
+            CODEBRIDGE_EVAL_GITHUB_PRIVATE_KEY
+            CODEBRIDGE_EVAL_GITHUB_INSTALLATION_ID
+            CODEBRIDGE_EVAL_CODEX_API_KEY
+            AZURE_OPENAI_API_KEY
+            AZURE_OPENAI_BASE_URL
+            AZURE_RESOURCE_NAME
+          )
+          for name in "${required[@]}"; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing required secret or env: $name"
+              exit 1
+            fi
+          done
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Clone evaluation repository
+        run: git clone "https://github.com/${CODEBRIDGE_EVAL_REPO}.git" "$RUNNER_TEMP/codebridge-test"
+
+      - name: Install OpenCode CLI
+        run: npm install -g opencode-ai
+
+      - name: Write OpenCode config
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.config/opencode"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          target = Path.home() / ".config" / "opencode" / "opencode.json"
+          target.write_text(json.dumps({
+            "$schema": "https://opencode.ai/config.json",
+            "provider": {
+              "azure": {
+                "options": {
+                  "apiKey": os.environ["AZURE_OPENAI_API_KEY"],
+                  "resourceName": os.environ["AZURE_RESOURCE_NAME"],
+                }
+              }
+            },
+            "permission": {
+              "edit": "allow",
+              "bash": "allow",
+              "skill": "allow",
+              "webfetch": "allow",
+              "doom_loop": "deny",
+              "external_directory": "deny"
+            }
+          }, indent=2))
+          print(target)
+          PY
+
+      - name: Start OpenCode server
+        shell: bash
+        run: |
+          nohup opencode serve --hostname 127.0.0.1 --port 4096 >"$RUNNER_TEMP/opencode.log" 2>&1 &
+          for _ in {1..60}; do
+            if curl -sf http://127.0.0.1:4096/global/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::OpenCode server failed to start"
+          cat "$RUNNER_TEMP/opencode.log" || true
+          exit 1
+
+      - name: Write CodeBridge eval config
+        run: pnpm tsx scripts/write-live-eval-config.ts --output "$RUNNER_TEMP/codebridge-eval/config.yaml" --repo-path "$RUNNER_TEMP/codebridge-test" --repo "$CODEBRIDGE_EVAL_REPO"
+
+      - name: Start CodeBridge
+        shell: bash
+        env:
+          PORT: 8790
+          ROLE: all
+          QUEUE_MODE: memory
+          DATABASE_URL: sqlite://${{ runner.temp }}/codebridge-eval/codebridge.db
+          CONFIG_PATH: ${{ runner.temp }}/codebridge-eval/config.yaml
+          GITHUB_POLL_INTERVAL: 5
+          GITHUB_POLL_BACKFILL: "false"
+          CODEX_API_KEY: ${{ secrets.CODEBRIDGE_EVAL_CODEX_API_KEY }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/codebridge-eval"
+          nohup node dist/index.js >"$RUNNER_TEMP/codebridge.log" 2>&1 &
+          for _ in {1..60}; do
+            if curl -sf http://127.0.0.1:8790/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::CodeBridge failed to start"
+          cat "$RUNNER_TEMP/codebridge.log" || true
+          exit 1
+
+      - name: Wait for first polling cycle
+        run: sleep 8
+
+      - name: Run live customer-flow eval
+        env:
+          CODEX_API_KEY: ${{ secrets.CODEBRIDGE_EVAL_CODEX_API_KEY }}
+        run: |
+          pnpm tsx scripts/eval-customer-flow.ts \
+            --repo "$CODEBRIDGE_EVAL_REPO" \
+            --repo-path "$RUNNER_TEMP/codebridge-test" \
+            --database-url "sqlite://$RUNNER_TEMP/codebridge-eval/codebridge.db" \
+            --codex-handle "@CodexApp" \
+            --codex-bot-login "codexengineer[bot]" \
+            --codex-app-key "codex" \
+            --opencode-handle "@OpenCodeApp" \
+            --opencode-bot-login "codexengineer[bot]" \
+            --opencode-app-key "opencode"
+
+      - name: Upload eval artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-customer-flow-eval-artifacts
+          path: |
+            reports/
+            ${{ runner.temp }}/codebridge.log
+            ${{ runner.temp }}/opencode.log
