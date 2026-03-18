@@ -123,30 +123,24 @@ Result matrix:
   - mode: synthetic `discussion_comment` webhook fallback
   - evidence: report `reports/codebridge-test-report-2026-03-17T16-12-48-856Z.json`
 
-Additional multi-app customer-flow verification on March 17, 2026:
+Additional multi-app route/backend verification on March 17, 2026:
 
-- `issue-mention` via `@OpenCodeApp`: `pass`
+- `issue-mention` via the configured OpenCode route: `pass`
   - issue: [#524](https://github.com/dzianisv/codebridge-test/issues/524)
   - final status comment: [#issuecomment-4078045205](https://github.com/dzianisv/codebridge-test/issues/524#issuecomment-4078045205)
   - resulting PR: [#525](https://github.com/dzianisv/codebridge-test/pull/525)
   - persistence evidence: sqlite run `ZkkIiFQf` stored `status=succeeded`, `backend=opencode`, `github_app_key=opencode`, `pr_url=https://github.com/dzianisv/codebridge-test/pull/525`
+  - this proves route/backend behavior only; it is not sufficient proof of distinct GitHub App identity unless the handle and author login are distinct
 
 March 18, 2026 hard-gate finding that must stay covered:
 
-- `issue-mention` via `@OpenCodeApp` can leave the checkout clean while still producing a branch with commits ahead of `main`
+- `issue-mention` via the OpenCode route can leave the checkout clean while still producing a branch with commits ahead of `main`
   - failure evidence: [issue #536](https://github.com/dzianisv/codebridge-test/issues/536)
   - observed behavior: OpenCode committed and pushed branch `opencodeapp-guzqj7ve` but did not return a PR URL, and the bridge incorrectly recorded `no_changes`
   - required behavior now: treat branch-ahead state as real work, push/reuse/create the PR, and only report `no_changes` when the checkout is clean and the prepared branch is not ahead of the base branch
 
-March 18, 2026 hard-gate rerun after the fix:
+March 18, 2026 correction:
 
-- `issue-mention` via `@CodexApp`: `pass`
-  - issue: [#542](https://github.com/dzianisv/codebridge-test/issues/542)
-  - final status comment answers directly on-thread with `GPT-1`, `June 2018`, and a Wikipedia link
-  - persistence evidence: sqlite run `QXiP-qT3` stored `status=no_changes`, `backend=codex`, `github_app_key=codex`
-- `issue-mention` via `@OpenCodeApp`: `pass`
-  - issue: [#543](https://github.com/dzianisv/codebridge-test/issues/543)
-  - final status comment: [#issuecomment-4079013332](https://github.com/dzianisv/codebridge-test/issues/543#issuecomment-4079013332)
-  - resulting PR: [#544](https://github.com/dzianisv/codebridge-test/pull/544)
-  - persistence evidence: sqlite run `g_uIe3gt` stored `status=succeeded`, `backend=opencode`, `github_app_key=opencode`, `pr_url=https://github.com/dzianisv/codebridge-test/pull/544`
-  - command results surfaced on-thread: `bun test` passed, `bun run src/main.ts` passed with `Hello, world!`
+- local issues [#542](https://github.com/dzianisv/codebridge-test/issues/542) and [#543](https://github.com/dzianisv/codebridge-test/issues/543) proved the route/backend flow only
+- they did **not** satisfy the distinct-app requirement because the final author was still `codexengineer[bot]`
+- the hard-gate evaluator and config generator now reject that setup and require distinct real app handles and bot authors for `codex` and `opencode`

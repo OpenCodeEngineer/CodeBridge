@@ -27,13 +27,14 @@ jobs:
       CODEBRIDGE_EVAL_GITHUB_APP_ID: ${{ secrets.CODEBRIDGE_EVAL_GITHUB_APP_ID }}
       CODEBRIDGE_EVAL_GITHUB_PRIVATE_KEY: ${{ secrets.CODEBRIDGE_EVAL_GITHUB_PRIVATE_KEY }}
       CODEBRIDGE_EVAL_GITHUB_INSTALLATION_ID: ${{ secrets.CODEBRIDGE_EVAL_GITHUB_INSTALLATION_ID }}
+      CODEBRIDGE_EVAL_OPENCODE_GITHUB_APP_ID: ${{ secrets.CODEBRIDGE_EVAL_OPENCODE_GITHUB_APP_ID }}
+      CODEBRIDGE_EVAL_OPENCODE_GITHUB_PRIVATE_KEY: ${{ secrets.CODEBRIDGE_EVAL_OPENCODE_GITHUB_PRIVATE_KEY }}
+      CODEBRIDGE_EVAL_OPENCODE_GITHUB_INSTALLATION_ID: ${{ secrets.CODEBRIDGE_EVAL_OPENCODE_GITHUB_INSTALLATION_ID }}
       CODEBRIDGE_EVAL_CODEX_API_KEY: ${{ secrets.CODEBRIDGE_EVAL_CODEX_API_KEY }}
       AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
       AZURE_OPENAI_BASE_URL: ${{ secrets.AZURE_OPENAI_BASE_URL }}
       AZURE_RESOURCE_NAME: ${{ secrets.AZURE_RESOURCE_NAME }}
       CODEBRIDGE_EVAL_REPO: dzianisv/codebridge-test
-      CODEBRIDGE_EVAL_CODEX_PREFIX: CodexApp
-      CODEBRIDGE_EVAL_OPENCODE_PREFIX: OpenCodeApp
       CODEBRIDGE_EVAL_OPENCODE_MODEL: azure/gpt-4.1
 
     steps:
@@ -62,6 +63,9 @@ jobs:
             CODEBRIDGE_EVAL_GITHUB_APP_ID
             CODEBRIDGE_EVAL_GITHUB_PRIVATE_KEY
             CODEBRIDGE_EVAL_GITHUB_INSTALLATION_ID
+            CODEBRIDGE_EVAL_OPENCODE_GITHUB_APP_ID
+            CODEBRIDGE_EVAL_OPENCODE_GITHUB_PRIVATE_KEY
+            CODEBRIDGE_EVAL_OPENCODE_GITHUB_INSTALLATION_ID
             CODEBRIDGE_EVAL_CODEX_API_KEY
             AZURE_OPENAI_API_KEY
             AZURE_OPENAI_BASE_URL
@@ -176,11 +180,7 @@ jobs:
             --repo "$CODEBRIDGE_EVAL_REPO" \
             --repo-path "$RUNNER_TEMP/codebridge-test" \
             --database-url "sqlite://$RUNNER_TEMP/codebridge-eval/codebridge.db" \
-            --codex-handle "@CodexApp" \
-            --codex-bot-login "codexengineer[bot]" \
             --codex-app-key "codex" \
-            --opencode-handle "@OpenCodeApp" \
-            --opencode-bot-login "codexengineer[bot]" \
             --opencode-app-key "opencode"
 
       - name: Upload eval artifacts

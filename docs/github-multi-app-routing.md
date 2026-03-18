@@ -6,10 +6,13 @@ Support more than one GitHub App against the same CodeBridge deployment and the 
 
 Initial customer-facing target:
 
-- mention `CodexApp` -> run backend `codex`
-- mention `OpenCodeApp` -> run backend `opencode`
+- mention `@<real-codex-app-slug>` -> run backend `codex`
+- mention `@<real-opencode-app-slug>` -> run backend `opencode`
 - both apps can watch the same repository concurrently
 - the app that ingests the command is also the app that posts status, labels, and PRs for that run
+
+The bootstrap mention must be the real installed GitHub App handle.
+Do not rely on arbitrary text aliases for issue bootstrap.
 
 ## Config Shape
 
@@ -29,13 +32,13 @@ secrets:
       privateKey: "..."
       webhookSecret: "..."
       commandPrefixes:
-        - "CodexApp"
+        - "real-codex-app-slug"
     opencode:
       appId: 234567
       privateKey: "..."
       webhookSecret: "..."
       commandPrefixes:
-        - "OpenCodeApp"
+        - "real-opencode-app-slug"
 ```
 
 Each key is an internal CodeBridge `appKey`, not a GitHub installation id.
@@ -117,6 +120,18 @@ That field is used for:
 
 Without that persisted app identity, multi-app mode would ingest correctly but reply using the wrong GitHub App.
 
+### Identity requirement
+
+Multi-app support is not satisfied by routing alone.
+
+For customer-facing proof, CodeBridge must show:
+
+- the correct real mention handle for each app,
+- the correct real bot author for each app,
+- distinct GitHub App identities for `codex` and `opencode`.
+
+If two app keys share one GitHub App slug or bot login, the hard-gate evaluator must fail.
+
 ### Backend-created PR recovery
 
 Multi-app routing also needs the finalization path to respect backend-specific behavior.
@@ -138,9 +153,9 @@ CodeBridge normalizes:
 
 This keeps existing deployments working while allowing a gradual move to named app keys.
 
-## March 17, 2026 Validation
+## Historical Validation Notes
 
-- Codex route:
+- March 17, 2026 route/backend validation:
   - issue `dzianisv/codebridge-test#518`
   - resulting PR `dzianisv/codebridge-test#519`
   - persisted run status `succeeded` with `github_app_key=codex`
@@ -148,3 +163,8 @@ This keeps existing deployments working while allowing a gradual move to named a
   - issue `dzianisv/codebridge-test#524`
   - resulting PR `dzianisv/codebridge-test#525`
   - persisted run `ZkkIiFQf` with status `succeeded`, `backend=opencode`, `github_app_key=opencode`, and `pr_url=https://github.com/dzianisv/codebridge-test/pull/525`
+
+Those runs proved routing and backend selection.
+They did not prove distinct GitHub App identity unless the issue mention handle and final author login were also distinct.
+
+The live customer-flow evaluator now rejects shared app credentials so this ambiguity cannot be silently accepted again.

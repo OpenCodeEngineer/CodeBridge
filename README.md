@@ -134,8 +134,8 @@ curl http://127.0.0.1:8788/health
 
 Go to **GitHub → Settings → Developer settings → GitHub Apps → New GitHub App** and fill in one app per backend route you want to expose. Typical setup:
 
-- `CodexApp` -> backend `codex`
-- `OpenCodeApp` -> backend `opencode`
+- `@<codex-app-slug>` -> backend `codex`
+- `@<opencode-app-slug>` -> backend `opencode`
 
 For each app:
 
@@ -189,13 +189,13 @@ secrets:
       privateKey: "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
       webhookSecret: "your-codex-webhook-secret"
       commandPrefixes:
-        - "CodexApp"
+        - "your-real-codex-app-slug"      # real GitHub App slug, no arbitrary alias
     opencode:
       appId: 234567
       privateKey: "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
       webhookSecret: "your-opencode-webhook-secret"
       commandPrefixes:
-        - "OpenCodeApp"
+        - "your-real-opencode-app-slug"   # real GitHub App slug, no arbitrary alias
 
 tenants:
   - id: local
@@ -203,9 +203,9 @@ tenants:
     github:
       apps:
         - appKey: "codex"
-          installationId: 12345678         # CodexApp installation id
+          installationId: 12345678         # real Codex app installation id
         - appKey: "opencode"
-          installationId: 23456789         # OpenCodeApp installation id
+          installationId: 23456789         # real OpenCode app installation id
     repos:
       - fullName: "your-org/your-repo"
         path: "/absolute/path/to/local/clone"
@@ -374,9 +374,12 @@ Comment in issue/PR/discussion:
 If you run multiple apps on the same repo, mention the app you want:
 
 ```text
-@CodexApp run fix the failing test
-@OpenCodeApp run refactor this integration using the opencode backend
+@your-real-codex-app-slug run fix the failing test
+@your-real-opencode-app-slug run refactor this integration using the opencode backend
 ```
+
+The mention handle must be the real installed GitHub App slug.
+Do not rely on arbitrary text aliases for issue bootstrap.
 
 ### Follow-up
 
@@ -409,10 +412,12 @@ pnpm eval:customer-flow -- \
   --database-url sqlite:///absolute/path/to/codebridge-eval.db
 ```
 
-This suite proves two user-facing GitHub flows end to end:
+This suite is only valid when Codex and OpenCode are backed by distinct installed GitHub Apps, each addressed by its real handle.
 
-- `@CodexApp` routes to backend `codex` and answers the GPT-1 release question on the issue thread with no PR.
-- `@OpenCodeApp` routes to backend `opencode`, creates a Bun + TypeScript hello-world app, runs it, opens a PR, and reports the PR back on the issue thread.
+It proves two user-facing GitHub flows end to end:
+
+- `@<real-codex-app-slug>` routes to backend `codex` and answers the GPT-1 release question on the issue thread with no PR.
+- `@<real-opencode-app-slug>` routes to backend `opencode`, creates a Bun + TypeScript hello-world app, runs it, opens a PR, and reports the PR back on the issue thread.
 
 It verifies:
 
@@ -420,6 +425,7 @@ It verifies:
 - persistence evidence: `backend`, `github_app_key`, and final run status from the live bridge database
 - executable PR verification: `bun test` and `bun run src/main.ts` on the generated PR branch
 - branch-ahead recovery: OpenCode is allowed to commit and push before CodeBridge inspects git state, and the bridge must still recover the PR flow instead of misclassifying the run as `no_changes`
+- identity proof: the evaluator resolves the real GitHub App slugs and bot logins from credentials and fails if the two app keys share one GitHub App identity
 
 Full design and workflow details live in [docs/evaluation.md](/Users/engineer/workspace/CodeBridge/docs/evaluation.md).
 

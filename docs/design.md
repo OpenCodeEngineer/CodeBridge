@@ -6,7 +6,7 @@ This design treats GitHub issue and PR conversation threads as the primary contr
 
 ## Core Behavior
 
-1. Bootstrap via issue assignment to an assignment trigger handle (native assignable actor, or configured `assignmentAssignees`), or via bootstrap mention to one of the configured GitHub Apps (`@CodexApp ...`, `@OpenCodeApp ...`) on:
+1. Bootstrap via issue assignment to an assignment trigger handle (native assignable actor, or configured `assignmentAssignees`), or via bootstrap mention to one of the configured GitHub Apps (`@<real-codex-app-slug> ...`, `@<real-opencode-app-slug> ...`) on:
    - issue comments
    - PR conversation comments
    - PR review comments

@@ -13,6 +13,11 @@ import {
   verifyKnowledgeResponse,
   type KnowledgeVerification
 } from "./eval-customer-flow-lib.js"
+import {
+  resolveExpectedBotLogin,
+  resolveExpectedHandle,
+  resolveRequiredEvalGithubAppsFromEnv
+} from "./live-eval-github-apps.js"
 
 type AgentBackend = "codex" | "opencode"
 
@@ -21,11 +26,11 @@ type Args = {
   repoPath?: string
   databaseUrl?: string
   only: "all" | "codex" | "opencode"
-  codexHandle: string
-  codexBotLogin: string
+  codexHandle?: string
+  codexBotLogin?: string
   codexAppKey: string
-  opencodeHandle: string
-  opencodeBotLogin: string
+  opencodeHandle?: string
+  opencodeBotLogin?: string
   opencodeAppKey: string
   timeoutSec: number
   pollSec: number
@@ -149,11 +154,11 @@ function parseArgs(argv: string[]): Args {
     repoPath: undefined,
     databaseUrl: undefined,
     only: "all",
-    codexHandle: "@CodexApp",
-    codexBotLogin: "codexengineer[bot]",
+    codexHandle: undefined,
+    codexBotLogin: undefined,
     codexAppKey: "codex",
-    opencodeHandle: "@OpenCodeApp",
-    opencodeBotLogin: "codexengineer[bot]",
+    opencodeHandle: undefined,
+    opencodeBotLogin: undefined,
     opencodeAppKey: "opencode",
     timeoutSec: 300,
     pollSec: 10,
@@ -758,6 +763,18 @@ function buildMissionCases(args: Args): MissionCaseDefinition[] {
   return cases
 }
 
+async function resolveLiveEvalArgs(args: Args): Promise<Args> {
+  const apps = await resolveRequiredEvalGithubAppsFromEnv()
+
+  return {
+    ...args,
+    codexHandle: resolveExpectedHandle("codex", args.codexHandle, apps.codex.handle),
+    codexBotLogin: resolveExpectedBotLogin("codex", args.codexBotLogin, apps.codex.botLogin),
+    opencodeHandle: resolveExpectedHandle("opencode", args.opencodeHandle, apps.opencode.handle),
+    opencodeBotLogin: resolveExpectedBotLogin("opencode", args.opencodeBotLogin, apps.opencode.botLogin)
+  }
+}
+
 function buildEvalTests(results: CaseCollected[]) {
   return results.map(entry => {
     const assertions: any[] = [
@@ -909,7 +926,8 @@ function writeMarkdownReport(input: {
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2))
+  const parsedArgs = parseArgs(process.argv.slice(2))
+  const args = await resolveLiveEvalArgs(parsedArgs)
   const azureJudge = resolveAzureJudgeConfig()
   const reportsDir = path.join(process.cwd(), "reports")
   mkdirSync(reportsDir, { recursive: true })

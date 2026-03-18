@@ -3,6 +3,7 @@
 import { mkdirSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import yaml from "js-yaml"
+import { resolveRequiredEvalGithubAppsFromEnv } from "./live-eval-github-apps.js"
 
 type Args = {
   outputPath: string
@@ -42,36 +43,14 @@ function parseArgs(argv: string[]): Args {
   return args
 }
 
-function requireEnv(name: string): string {
-  const value = process.env[name]?.trim()
-  if (!value) {
-    throw new Error(`Missing required environment variable ${name}`)
-  }
-  return value
-}
-
 function optionalEnv(name: string): string | undefined {
   const value = process.env[name]?.trim()
   return value ? value : undefined
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2))
-
-  const codexAppId = Number.parseInt(requireEnv("CODEBRIDGE_EVAL_GITHUB_APP_ID"), 10)
-  const codexPrivateKey = requireEnv("CODEBRIDGE_EVAL_GITHUB_PRIVATE_KEY")
-  const codexInstallationId = Number.parseInt(requireEnv("CODEBRIDGE_EVAL_GITHUB_INSTALLATION_ID"), 10)
-  const opencodeAppId = Number.parseInt(
-    optionalEnv("CODEBRIDGE_EVAL_OPENCODE_GITHUB_APP_ID") ?? String(codexAppId),
-    10
-  )
-  const opencodePrivateKey = optionalEnv("CODEBRIDGE_EVAL_OPENCODE_GITHUB_PRIVATE_KEY") ?? codexPrivateKey
-  const opencodeInstallationId = Number.parseInt(
-    optionalEnv("CODEBRIDGE_EVAL_OPENCODE_GITHUB_INSTALLATION_ID") ?? String(codexInstallationId),
-    10
-  )
-  const codexPrefix = optionalEnv("CODEBRIDGE_EVAL_CODEX_PREFIX") ?? "CodexApp"
-  const opencodePrefix = optionalEnv("CODEBRIDGE_EVAL_OPENCODE_PREFIX") ?? "OpenCodeApp"
+  const apps = await resolveRequiredEvalGithubAppsFromEnv()
   const opencodeBaseUrl = optionalEnv("CODEBRIDGE_EVAL_OPENCODE_BASE_URL") ?? "http://127.0.0.1:4096"
   const opencodeModel = optionalEnv("CODEBRIDGE_EVAL_OPENCODE_MODEL") ?? "azure/gpt-4.1"
   const codexModel = optionalEnv("CODEBRIDGE_EVAL_CODEX_MODEL") ?? "gpt-5.2-codex"
@@ -80,14 +59,14 @@ function main() {
     secrets: {
       githubApps: {
         codex: {
-          appId: codexAppId,
-          privateKey: codexPrivateKey,
-          commandPrefixes: [codexPrefix]
+          appId: apps.codex.appId,
+          privateKey: apps.codex.privateKey,
+          commandPrefixes: [apps.codex.slug]
         },
         opencode: {
-          appId: opencodeAppId,
-          privateKey: opencodePrivateKey,
-          commandPrefixes: [opencodePrefix]
+          appId: apps.opencode.appId,
+          privateKey: apps.opencode.privateKey,
+          commandPrefixes: [apps.opencode.slug]
         }
       }
     },
@@ -107,15 +86,15 @@ function main() {
           apps: [
             {
               appKey: "codex",
-              installationId: codexInstallationId,
+              installationId: apps.codex.installationId,
               repoAllowlist: [args.repoFullName],
-              commandPrefixes: [codexPrefix]
+              commandPrefixes: [apps.codex.slug]
             },
             {
               appKey: "opencode",
-              installationId: opencodeInstallationId,
+              installationId: apps.opencode.installationId,
               repoAllowlist: [args.repoFullName],
-              commandPrefixes: [opencodePrefix]
+              commandPrefixes: [apps.opencode.slug]
             }
           ]
         },
@@ -150,4 +129,7 @@ function main() {
   console.log(args.outputPath)
 }
 
-main()
+main().catch(error => {
+  console.error(error instanceof Error ? error.message : String(error))
+  process.exit(1)
+})
