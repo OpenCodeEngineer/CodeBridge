@@ -703,10 +703,16 @@ function parseMcpServerNames(output: string): string[] {
   return [...names]
 }
 
-function resolveCodexModelReasoningEffort(model: string | undefined): "low" | undefined {
+function resolveCodexModelReasoningEffort(model: string | undefined): "low" | "medium" | undefined {
   const normalized = model?.trim().toLowerCase()
   if (!normalized) return undefined
-  return normalized.startsWith("gpt-5") ? DEFAULT_GPT5_CODEX_REASONING_EFFORT : undefined
+  if (normalized.includes("codex")) {
+    return DEFAULT_GPT5_CODEX_REASONING_EFFORT
+  }
+  if (normalized === "gpt-5.4-pro") {
+    return "medium"
+  }
+  return undefined
 }
 
 function extractPullRequestReference(text: string): { url: string; number: number } | null {

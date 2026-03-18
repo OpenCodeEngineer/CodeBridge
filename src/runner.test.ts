@@ -428,6 +428,40 @@ describe("runner Codex execution", () => {
     }))
     expect(statuses).toEqual(["running", "no_changes"])
   })
+
+  it("uses medium reasoning effort for gpt-5.4-pro", async () => {
+    const statuses: string[] = []
+    const store = {
+      getRun: vi.fn().mockResolvedValue(makeRun({
+        backend: "codex",
+        agent: undefined,
+        model: "gpt-5.4-pro",
+        github: undefined
+      })),
+      updateRunStatus: vi.fn().mockImplementation(async (_id: string, status: string) => {
+        statuses.push(status)
+      }),
+      updateRunBranch: vi.fn().mockResolvedValue(undefined),
+      updateRunPr: vi.fn().mockResolvedValue(undefined),
+      appendEvent: vi.fn().mockResolvedValue(undefined)
+    }
+
+    const { createRunner } = await import("./runner.js")
+    const runner = createRunner({
+      store: store as any,
+      env: {
+        codexTurnTimeoutMs: 60_000
+      }
+    })
+
+    await runner({ runId: "run_456" })
+
+    expect(codexSdkMocks.startThread).toHaveBeenCalledWith(expect.objectContaining({
+      model: "gpt-5.4-pro",
+      modelReasoningEffort: "medium"
+    }))
+    expect(statuses).toEqual(["running", "no_changes"])
+  })
 })
 
 describe("extractPullRequestReference", () => {

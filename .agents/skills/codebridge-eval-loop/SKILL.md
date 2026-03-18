@@ -1,3 +1,13 @@
+---
+name: codebridge-eval-loop
+description: Run the CodeBridge end-to-end evaluation loop, collect proof artifacts, and report status against the mission hard gate.
+license: MIT
+compatibility: codex, opencode
+metadata:
+  audience: developers
+  workflow: evaluation
+---
+
 # CodeBridge Eval Loop
 
 Use this skill when you need to run the full CodeBridge mission validation cycle and report status with proof artifacts.
