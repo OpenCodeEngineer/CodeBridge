@@ -25,7 +25,7 @@ const repoGithubAppSchema = z.object({
 
 const repoSchema = z.object({
   fullName: z.string(),
-  path: z.string(),
+  path: z.string().optional(),
   backend: z.enum(["codex", "opencode"]).optional(),
   agent: z.string().optional(),
   model: z.string().optional(),

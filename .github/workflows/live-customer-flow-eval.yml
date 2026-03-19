@@ -90,9 +90,6 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Clone evaluation repository
-        run: git clone "https://github.com/${CODEBRIDGE_EVAL_REPO}.git" "$RUNNER_TEMP/codebridge-test"
-
       - name: Install OpenCode CLI
         run: npm install -g opencode-ai
 
@@ -143,7 +140,7 @@ jobs:
           exit 1
 
       - name: Write CodeBridge eval config
-        run: pnpm tsx scripts/write-live-eval-config.ts --output "$RUNNER_TEMP/codebridge-eval/config.yaml" --repo-path "$RUNNER_TEMP/codebridge-test" --repo "$CODEBRIDGE_EVAL_REPO"
+        run: pnpm tsx scripts/write-live-eval-config.ts --output "$RUNNER_TEMP/codebridge-eval/config.yaml" --repo "$CODEBRIDGE_EVAL_REPO"
 
       - name: Start CodeBridge
         shell: bash
@@ -153,6 +150,7 @@ jobs:
           QUEUE_MODE: memory
           DATABASE_URL: ${{ runner.temp }}/codebridge-eval/codebridge.db
           CONFIG_PATH: ${{ runner.temp }}/codebridge-eval/config.yaml
+          CODEBRIDGE_WORKSPACE_ROOT: ${{ runner.temp }}/workspace
           GITHUB_POLL_INTERVAL: 5
           GITHUB_POLL_BACKFILL: "false"
           CODEX_API_KEY: ${{ secrets.CODEBRIDGE_EVAL_CODEX_API_KEY }}
@@ -178,7 +176,7 @@ jobs:
         run: |
           pnpm tsx scripts/eval-customer-flow.ts \
             --repo "$CODEBRIDGE_EVAL_REPO" \
-            --repo-path "$RUNNER_TEMP/codebridge-test" \
+            --workspace-root "$RUNNER_TEMP/workspace" \
             --database-url "$RUNNER_TEMP/codebridge-eval/codebridge.db" \
             --codex-app-key "codex" \
             --opencode-app-key "opencode"

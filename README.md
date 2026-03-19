@@ -2,7 +2,7 @@
 
 CodeBridge turns GitHub issues, PR conversation comments, PR review comments, and discussion comments into a control plane for local coding agents.
 
-Assign or mention one of your GitHub App bots, and CodeBridge runs the configured agent backend against the mapped local repo, then posts progress, summaries, and PR links back to the same thread.
+Assign or mention one of your GitHub App bots, and CodeBridge resolves the GitHub repo into a managed local workspace clone plus per-task worktree, runs the configured agent backend there, then posts progress, summaries, and PR links back to the same thread.
 
 ## Install
 
@@ -56,7 +56,7 @@ git clone https://github.com/dzianisv/CodeBridge.git && cd CodeBridge && pnpm in
 
 1. A user assigns an issue to a native assignable actor or comments with the GitHub App handle on an issue, PR conversation, PR review comment, or discussion.
 2. CodeBridge resolves tenant/repo, creates a run, and marks lifecycle labels on issue and PR conversation threads.
-3. Worker executes the configured backend against the configured local repo path.
+3. Worker executes the configured backend against a CodeBridge-managed task worktree.
 4. Progress and final summary are posted by the GitHub App identity.
 5. If code changed, CodeBridge opens a PR and links it back to the originating GitHub thread.
 
@@ -106,6 +106,8 @@ export DATABASE_URL=./data/codebridge.db
 export QUEUE_MODE=memory
 export GITHUB_POLL_INTERVAL=15
 export GITHUB_POLL_BACKFILL=false
+# optional override; defaults to $HOME/workspace
+# export CODEBRIDGE_WORKSPACE_ROOT=$HOME/workspace
 # optional safety guard: fail stuck agent turns after 5 minutes
 # export CODEX_TURN_TIMEOUT_MS=300000
 # optional OpenCode backend
@@ -259,7 +261,7 @@ For webhook and polling events, CodeBridge resolves the target local checkout in
 2. GitHub `owner/repo` full name -> repo entry inside that tenant
 3. optional `tenant:<id>` hint in the comment, but only if that tenant is valid for the same installation and the same GitHub repo
 
-The actual local execution path comes from the matched tenant repo entry:
+The actual GitHub run path is derived from the GitHub repo identity plus the managed workspace root:
 
 ```yaml
 tenants:
@@ -272,7 +274,6 @@ tenants:
             - dzianisv/codebridge-test
     repos:
       - fullName: dzianisv/codebridge-test
-        path: /absolute/path/to/local/checkout
         branchPrefix: codex
 ```
 
@@ -280,8 +281,10 @@ Important behavior:
 
 - GitHub issue, PR, and discussion commands use an exact `repos[].fullName` match.
 - `defaultRepo` is only a fallback for non-GitHub entrypoints such as Slack or `/codex/notify`.
-- If `repo.path` does not exist locally, the run cannot start.
-- Repo mapping is resolved before backend dispatch. A GitHub mention on `owner/repo-a` can only execute against the configured `repo.path` for `owner/repo-a`.
+- For GitHub-originated runs, CodeBridge prefers a base clone at `$CODEBRIDGE_WORKSPACE_ROOT/<repo-name>`.
+- If that path is already occupied by another repo, CodeBridge falls back to `$CODEBRIDGE_WORKSPACE_ROOT/<owner>__<repo-name>`.
+- Task worktrees are created under `$CODEBRIDGE_WORKSPACE_ROOT/.codebridge/worktrees/<owner>__<repo-name>/<run-id>`.
+- `repos[].path` is optional and is only required for entrypoints that do not already carry GitHub repo identity.
 
 ## Backend Selection
 
@@ -310,9 +313,9 @@ tenants:
           installationId: 222222
     repos:
       - fullName: "owner/repo"
-        path: "/absolute/path/to/local/checkout"
         backend: "codex"
         model: "gpt-5.2-codex"
+        path: "/absolute/path/to/local/checkout"   # optional; only needed for non-GitHub entrypoints
         githubApps:
           opencode:
             backend: "opencode"
@@ -338,24 +341,25 @@ Important behavior:
 
 ## Execution Model
 
-CodeBridge currently executes against the configured local checkout path. It does not create an ephemeral clone or manage a dedicated `git worktree` per run.
+For GitHub-originated runs, CodeBridge now owns clone/worktree lifecycle under the managed workspace root.
+It does not run backends against a shared mutable checkout.
 
 Backend behavior:
 
-- `codex`: CodeBridge starts a local Codex SDK thread in `repo.path`.
-- `opencode`: CodeBridge still prepares the git branch locally, then creates an OpenCode session over HTTP and scopes that session to the same `repo.path`. For GitHub-originated runs, the preferred contract is that OpenCode does not use GitHub tooling or `git push`; it leaves local edits or local commits for CodeBridge to publish with the handling app identity. CodeBridge also sends `tools.github=false` on those prompt requests so the OpenCode server cannot use its configured GitHub MCP for that run. If OpenCode still leaves the checkout clean, CodeBridge does not assume `no_changes`: it first looks for a returned PR URL, then checks whether the prepared branch is ahead of the remote base branch, pushes that branch if needed, reuses an already-open PR for that head branch, or creates the PR itself.
+- `codex`: CodeBridge starts a local Codex SDK thread in the resolved task worktree.
+- `opencode`: CodeBridge prepares the git state locally, then creates an OpenCode session over HTTP scoped to that same task worktree. For GitHub-originated runs, the preferred contract is that OpenCode does not use GitHub tooling or `git push`; it leaves local edits or local commits for CodeBridge to publish with the handling app identity. CodeBridge also sends `tools.github=false` on those prompt requests so the OpenCode server cannot use its configured GitHub MCP for that run. If OpenCode still leaves the checkout clean, CodeBridge does not assume `no_changes`: it first looks for a returned PR URL, then checks whether the prepared branch is ahead of the remote base branch, pushes that branch if needed, reuses an already-open PR for that head branch, or creates the PR itself.
 
 Before starting a run, the worker:
 
-1. verifies the configured checkout is clean,
-2. fetches `origin`,
-3. creates a fresh branch from the remote default branch,
-4. runs the selected backend in that checkout,
-5. if the backend left uncommitted changes, CodeBridge commits and pushes them from that same checkout,
-6. if the backend left a clean branch with commits, CodeBridge still pushes/reuses/creates the PR from that branch instead of reporting `no_changes`,
-7. if the backend already completed the PR flow and returned a GitHub PR URL, CodeBridge records that PR as the successful outcome.
-
-That keeps repo mapping deterministic, but it also means one configured checkout is one mutable execution target. If you need stronger isolation or parallelism for the same GitHub repo, provide separate local clones or worktrees as separate configured `repo.path` targets.
+1. ensures or refreshes the base clone under the managed workspace root,
+2. creates a fresh per-task worktree from the remote default branch,
+3. verifies the task worktree is clean,
+4. fetches `origin`,
+5. creates a fresh branch from the remote default branch,
+6. runs the selected backend in that task worktree,
+7. if the backend left uncommitted changes, CodeBridge commits and pushes them from that task worktree,
+8. if the backend left a clean branch with commits, CodeBridge still pushes/reuses/creates the PR from that branch instead of reporting `no_changes`,
+9. if the backend already completed the PR flow and returned a GitHub PR URL, CodeBridge records that PR as the successful outcome.
 
 ## Triggering Runs
 
@@ -410,7 +414,7 @@ Runs the required live customer-flow mission gate:
 ```bash
 pnpm eval:customer-flow -- \
   --repo dzianisv/codebridge-test \
-  --repo-path /absolute/path/to/dedicated/codebridge-test-clone \
+  --workspace-root /absolute/path/to/dedicated/codebridge-workspace \
   --database-url /absolute/path/to/codebridge-eval.db
 ```
 
@@ -426,6 +430,7 @@ It verifies:
 
 - GitHub-visible evidence: the trigger comment used the real handle, the expected bot replied on the issue thread, and the OpenCode PR author matches the expected app
 - persistence evidence: `backend`, `github_app_key`, and final run status from the live bridge database
+- workspace evidence: the persisted `repo_path` is inside the managed workspace root and uses the per-task worktree layout instead of the base clone path
 - executable PR verification: `bun test` and `bun run src/main.ts` on the generated PR branch
 - backend publication contract: the OpenCode eval task forbids GitHub writes and `git push` from inside the backend task, and CodeBridge sends `tools.github=false` on GitHub-originated OpenCode prompts so the bridge must publish the branch and PR itself
 - branch-ahead recovery: OpenCode is allowed to commit and push before CodeBridge inspects git state, and the bridge must still recover the PR flow instead of misclassifying the run as `no_changes`
@@ -509,7 +514,7 @@ pnpm test:vibe-agents
 ## Troubleshooting
 
 - If assignment bootstrap does not trigger, verify app/user assignability for that repo. Mention bootstrap remains the fallback.
-- If a GitHub mention is ignored, verify that repository appears in both tenant `repos` and `github.repoAllowlist`, and that the configured `repo.path` exists locally.
+- If a GitHub mention is ignored, verify that repository appears in both tenant `repos` and `github.repoAllowlist`, and that `CODEBRIDGE_WORKSPACE_ROOT` is writable.
 - If polling misses first historical comments, keep `GITHUB_POLL_BACKFILL=false` and post a new comment after poller startup.
 - If no PR is created, inspect run summary comments for repo cleanliness, auth, or network errors.
 - If discussion validation passes only through synthetic fallback, that usually means the app still lacks Discussions permission on the target repo. Use the running bridge's `DATABASE_URL` and webhook secret when executing the protocol runner.

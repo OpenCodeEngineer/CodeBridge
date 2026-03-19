@@ -15,6 +15,12 @@ CodeBridge keeps ownership of GitHub routing, tenant/repo resolution, status pos
 
 OpenCode is used as the execution backend over HTTP.
 
+Source-of-truth adjustment:
+
+- For GitHub-originated runs, OpenCode should receive an isolated CodeBridge-created task worktree, not a shared preconfigured checkout path.
+- CodeBridge should ensure a base clone exists under `$HOME/workspace`, then create a per-task worktree before making the OpenCode HTTP request.
+- The backend still must not choose the repo. It receives the already-resolved worktree path from CodeBridge.
+
 CodeBridge still prefers to own commit/push/PR creation when the checkout is dirty after the backend finishes. However, live validation showed two clean-checkout success modes that must not be downgraded to `no_changes`:
 
 - OpenCode can finish the git/PR flow itself and return a GitHub PR URL.
@@ -26,10 +32,11 @@ That means a GitHub issue assignment or mention is mapped like this:
 
 1. GitHub installation id -> tenant
 2. GitHub `owner/repo` -> `repos[].fullName`
-3. configured local checkout -> `repos[].path`
-4. selected backend -> `repos[].backend`
+3. base clone under `$HOME/workspace`
+4. task worktree created by CodeBridge
+5. selected backend -> `repos[].backend`
 
-The backend never chooses the repo. It receives the already-resolved local checkout path.
+The backend never chooses the repo. It should receive the already-resolved task worktree path.
 
 ## Why This Shape
 
@@ -40,19 +47,24 @@ The backend never chooses the repo. It receives the already-resolved local check
 
 ## Runtime Flow
 
-For a repo configured with `backend: opencode`, the runner does this:
+For a GitHub-originated repo configured with `backend: opencode`, the intended runner flow is:
 
-1. resolve the local checkout from tenant config
-2. verify the checkout is clean
-3. fetch `origin`
-4. create a fresh branch from the remote default branch
-5. call the OpenCode server using the resolved checkout path
+1. resolve the GitHub repo identity from the event payload
+2. ensure the base clone exists under `$HOME/workspace`
+3. fetch `origin` in the base clone
+4. create a fresh per-task worktree from the remote default branch
+5. call the OpenCode server using that worktree path
 6. wait for the assistant to finish
-7. if the checkout is dirty, commit, push, and open a PR from the same local checkout
-8. if the checkout is already clean but the prepared branch is ahead of `origin/<base>`, push that branch, reuse an existing open PR for it if one already exists, otherwise create the PR
-9. if the checkout is already clean and the assistant response contains a GitHub PR URL, persist that PR URL and mirror it back to the originating GitHub thread as the successful outcome
+7. if the worktree is dirty, commit, push, and open a PR from that worktree
+8. if the worktree is already clean but the prepared branch is ahead of `origin/<base>`, push that branch, reuse an existing open PR for it if one already exists, otherwise create the PR
+9. if the worktree is already clean and the assistant response contains a GitHub PR URL, persist that PR URL and mirror it back to the originating GitHub thread as the successful outcome
 
-The current integration does not ask OpenCode to create or manage worktrees. CodeBridge continues to use the configured checkout path directly.
+Current implementation state:
+
+- GitHub-originated OpenCode runs now create or reuse a base clone under `$HOME/workspace`
+- CodeBridge now creates a fresh per-task worktree before each OpenCode HTTP session
+- OpenCode now receives that task worktree path, not a shared mutable checkout
+- `repos[].path` remains available only for non-GitHub entrypoints that do not already carry GitHub repo identity
 
 ## OpenCode API Usage
 
@@ -73,7 +85,7 @@ Current adapter flow in `src/opencode.ts`:
 
 Directory scoping:
 
-- every non-global OpenCode request is scoped to the resolved checkout path
+- every non-global OpenCode request should be scoped to the resolved task worktree path
 - the current adapter sends both the documented `directory` query parameter and the compatibility header `x-opencode-directory`
 - OpenCode runs against that directory instead of trying to infer project state from the caller environment
 
@@ -91,7 +103,7 @@ tenants:
   - id: local
     repos:
       - fullName: "owner/repo"
-        path: "/absolute/path/to/local/checkout"
+        path: "/absolute/path/to/local/checkout"   # optional; only needed for non-GitHub entrypoints
         backend: "opencode"
         agent: "build"
         model: "openai/gpt-5"
@@ -189,12 +201,11 @@ Benefits:
 
 Tradeoffs:
 
-- CodeBridge still uses one mutable checkout per configured `repo.path`
-- concurrent runs on the same checkout are still not isolated
-- the current integration intentionally does not use OpenCode worktree/workspace APIs
+- CodeBridge owns the worktree lifecycle itself instead of delegating workspace management to OpenCode
+- base clone path discovery is intentionally filesystem-driven under `$HOME/workspace`, not database-driven
+- the current integration intentionally does not use OpenCode worktree/workspace APIs yet
 
 ## Future Work
 
-- optional isolated execution using separate configured clones or worktrees per repo
-- optional OpenCode worktree API usage once CodeBridge has a clear ownership model for worktree lifecycle
+- optionally adopt OpenCode worktree/workspace APIs later if they complement, rather than replace, CodeBridge's ownership of worktree lifecycle
 - richer mapping of OpenCode parts into GitHub progress comments

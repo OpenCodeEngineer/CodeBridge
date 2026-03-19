@@ -58,12 +58,12 @@ Make GitHub issue and PR conversation threads behave like a chat surface with th
 - For GitHub-originated commands, repo selection inside the chosen tenant must use exact `repository.full_name` matching against `repos[].fullName`.
 - Tenant GitHub installation selection must be app-aware: `github.apps[].appKey + installationId`.
 - `defaultRepo` must not remap one GitHub repository event onto a different configured repository.
-- The configured local `repos[].path` must exist before a run is enqueued; otherwise the bridge must fail fast with actionable diagnostics.
+- GitHub-originated runs must derive local execution state from `$HOME/workspace` plus the GitHub repo identity, not from a required configured checkout path.
 - Repo backend selection is per configured repo:
   - `repos[].backend` chooses the execution backend and defaults to `codex`
   - `repos[].githubApps.<appKey>` can override backend/agent/model/branch settings for that app
   - `repos[].agent` stores backend-specific agent selection
-  - backend integrations receive the resolved `repos[].path`; they do not infer a repo or worktree from the GitHub mention, process cwd, or agent state
+  - backend integrations receive the resolved local run path from CodeBridge; they do not infer a repo or worktree from the GitHub mention, process cwd, or agent state
 
 ### R4. Issue Association
 
@@ -129,6 +129,6 @@ Make GitHub issue and PR conversation threads behave like a chat surface with th
 - Discussion follow-up remains explicit exact-app-slug based.
 - `tenant:<id>` reliably routes commands to the desired tenant.
 - Two GitHub Apps can watch the same repository concurrently without poll-state collisions or cross-app managed-thread misrouting.
-- Backend selection is deterministic per configured repo and still uses the exact configured local checkout path.
+- Backend selection is deterministic per configured repo and GitHub-originated runs execute inside a CodeBridge-created task worktree under the managed workspace root.
 - Issue labels reflect run state transitions.
 - Assistant responses are posted by the app bot account.

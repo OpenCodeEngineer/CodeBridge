@@ -47,6 +47,7 @@ export function findTenantRepoByPath(config: AppConfig, cwd: string): TenantRepo
 
   for (const tenant of config.tenants) {
     for (const repo of tenant.repos) {
+      if (!repo.path) continue
       const repoPath = normalizeForCompare(path.resolve(repo.path))
       if (!pathContains(repoPath, resolvedCwd)) continue
       if (repoPath.length <= bestLen) continue
@@ -89,6 +90,9 @@ export function resolveRepo(tenant: TenantConfig, repoHint?: string, appKey?: st
 }
 
 export async function ensureRepoPath(repo: RepoConfig): Promise<string> {
+  if (!repo.path?.trim()) {
+    throw new Error(`Repository ${repo.fullName} does not define repos[].path for non-GitHub execution paths`)
+  }
   const resolved = path.resolve(repo.path)
   await access(resolved)
   return resolved

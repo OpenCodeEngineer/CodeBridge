@@ -4,6 +4,25 @@
 
 This design treats GitHub issue and PR conversation threads as the primary control plane for local agent execution, supports PR review comments as explicit command surfaces, and keeps discussion threads explicit as well. App-authored feedback and durable session state are represented by labels/comments where the surface supports them.
 
+## Product Source Of Truth
+
+For GitHub-originated runs, the intended product flow is:
+
+1. User creates an issue or comment on GitHub.
+2. User explicitly addresses the installed GitHub App by its real handle.
+3. CodeBridge resolves the GitHub repository identity from the event payload.
+4. CodeBridge ensures a base clone exists under `$HOME/workspace`.
+   - if the repo is missing locally, clone it
+   - if the repo already exists, fetch/update it
+5. CodeBridge creates an isolated per-task git worktree.
+6. CodeBridge delegates that isolated worktree path to the selected backend.
+7. Backend works only inside that worktree.
+8. CodeBridge publishes the result back to the originating GitHub thread using the same GitHub App identity that handled the run.
+9. For implementation tasks, the default expectation is usually a PR, but the issue instructions still decide whether a PR is required for that run.
+
+That model is now implemented for GitHub-originated runs.
+Non-GitHub entrypoints can still use `repos[].path` directly when no GitHub repo identity is present.
+
 ## Core Behavior
 
 1. Bootstrap via issue assignment to an assignment trigger handle (native assignable actor, or configured `assignmentAssignees`), or via bootstrap mention to one of the configured GitHub Apps (`@<real-codex-app-slug> ...`, `@<real-opencode-app-slug> ...`) on:
@@ -15,7 +34,7 @@ This design treats GitHub issue and PR conversation threads as the primary contr
 2. Issue and PR conversation threads are marked managed (`agent:managed`).
 3. After that, plain human comments on the same managed issue or PR thread are interpreted as follow-up prompts only for the app that owns the latest run on that thread.
 4. PR review comments and discussion threads remain explicit-command surfaces; follow-up comments there still require the exact app slug handle.
-5. Bridge executes the configured backend against the resolved local checkout and writes status/answers back to the originating GitHub thread.
+5. Bridge executes the configured backend against the resolved local task worktree and writes status/answers back to the originating GitHub thread.
 
 For GitHub comment routing, "real handle" means the exact `@<app-slug>` token resolved from the GitHub App identity (`GET /app`), not an arbitrary configured alias. GitHub may still render that token as plain text instead of an inline mention link in the issue body, so validity is defined by exact slug match plus matching app-authored response, not by UI highlighting alone. If GitHub App identity resolution is temporarily unavailable, CodeBridge may fall back to configured `commandPrefixes`, but those values must still equal the real slug exactly.
 
@@ -48,7 +67,7 @@ If resolution fails, post a bot error comment with valid tenant ids. Tenant reso
 
 ## GitHub Repo Resolution
 
-For GitHub-originated events, CodeBridge does not inspect the process cwd or try to infer a repo from the machine state. The mapping is fully config-driven.
+For GitHub-originated events, CodeBridge should not inspect the process cwd or infer a repo from agent state. It should resolve the GitHub repository from the event payload, then own local clone/worktree lifecycle under `$HOME/workspace`.
 
 Resolution flow:
 
@@ -61,11 +80,15 @@ Resolution flow:
    - contains the same `repository.full_name`,
    - and allows that repo through `github.repoAllowlist` when configured.
 5. Resolve the repo within that tenant by exact `repos[].fullName` match.
-6. Resolve the local checkout path from `repos[].path` and fail fast if the path is missing.
+6. Derive or discover the base clone path under `$HOME/workspace`.
+7. If the base clone is missing, clone it.
+8. If the base clone exists, fetch/update it.
+9. Create an isolated worktree for the specific task.
+10. Pass that worktree path to the selected backend.
 
 This means a mention on `owner/repo-a` will not be remapped to `owner/repo-b` through `defaultRepo`. `defaultRepo` is reserved for non-GitHub entrypoints that do not already carry a concrete GitHub repository identity.
 
-Backend dispatch happens only after this repo resolution completes. The selected backend receives the resolved `repos[].path`; it does not infer a repository or worktree from the mention text, process cwd, or agent state.
+Backend dispatch happens only after this repo resolution completes. The selected backend should receive the resolved worktree path; it must not infer a repository or worktree from the mention text, process cwd, or agent state.
 
 ## Multi-App GitHub Identity
 
@@ -84,37 +107,38 @@ Backend dispatch happens only after this repo resolution completes. The selected
 - `repos[].agent` stores backend-specific agent metadata. It is currently forwarded to OpenCode sessions.
 - Run records persist both `backend` and `agent` so status comments, commit messages, PR titles, and debugging reflect the chosen execution path.
 - Current backend implementations:
-  - `codex`: local Codex SDK thread started in the configured checkout
-  - `opencode`: HTTP session created against the same configured checkout path
+  - `codex`: local Codex SDK thread started in the resolved task worktree
+  - `opencode`: HTTP session created against the same resolved task worktree
 
 ## Local Checkout Model
 
-Current design decision: CodeBridge executes in the configured checkout path directly, regardless of backend.
+Target design decision: GitHub-originated runs should execute in an isolated git worktree created by CodeBridge from a base clone under `$HOME/workspace`.
 
-- No automatic `git worktree add`
-- No temporary clone per run
-- No repo-path indirection beyond `repos[].path`
-- No OpenCode-managed workspace/worktree creation in the current integration
+Target execution sequence:
 
-Execution sequence:
-
-1. Ensure `repo.path` exists.
-2. Refuse to run if the checkout has uncommitted changes.
-3. Fetch `origin`.
-4. Create a new branch from the remote default branch.
-5. Run the selected backend inside that checkout.
-6. Commit, push, and open a PR from that same checkout.
+1. Ensure the base clone for `owner/repo` exists under `$HOME/workspace`.
+2. Refuse to mutate the base clone directly during a task run.
+3. Fetch `origin` in the base clone.
+4. Create a new per-task worktree from the remote default branch.
+5. Run the selected backend inside that worktree only.
+6. Commit, push, and open a PR from that task worktree when the task requires code changes.
+7. Reuse the base clone for future tasks, but never reuse the task worktree for another run.
 
 Why this design exists:
 
-- deterministic mapping from GitHub repo -> local path
-- easier debugging because the worker operates in a known checkout
-- simpler app-authored PR flow
+- the GitHub repo itself should be enough to discover local execution state
+- tasks must be isolated from each other
+- backends should receive a fresh worktree, not a shared mutable checkout
+- it removes the need to preconfigure a fixed local path for every GitHub repo
 
-Trade-off:
+Current implementation details:
 
-- concurrent runs against the same `repo.path` are not isolated from each other
-- operators who need parallel isolated execution should provision separate local clones or dedicated worktrees and map them explicitly in config
+- GitHub-originated runs now resolve a base clone under `$HOME/workspace`
+- the preferred base clone path is `$HOME/workspace/<repo-name>`
+- if that path is already occupied by another repo, CodeBridge falls back to `$HOME/workspace/<owner>__<repo-name>`
+- per-task worktrees live under `$HOME/workspace/.codebridge/worktrees/<owner>__<repo-name>/<run-id>`
+- `repos[].path` is now optional and is only required for entrypoints that do not already carry GitHub repo identity
+- managed-session relay reuses the stored run worktree path instead of assuming a static configured checkout
 
 ## State Model
 
@@ -151,7 +175,7 @@ Trade-off:
                                   +-----+----------------------+------+
                                   |     Local Agent Backend            |
                                   |  - Codex SDK or OpenCode REST     |
-                                  |  - executes prompt in repo path   |
+                                  |  - executes prompt in task worktree|
                                   |  - returns assistant response     |
                                   +------------------------------------+
                                                          |
@@ -193,13 +217,16 @@ Trade-off:
   priority: tenant:<id> > issue binding > repo default
           |
           v
+[Resolve GitHub repo -> ensure base clone -> create task worktree]
+          |
+          v
 [Create/Reuse run; dedupe by source key]
           |
           v
 [Set labels: agent:managed + agent:in-progress when the surface supports labels]
           |
           v
-[Execute selected backend against resolved repo path]
+[Execute selected backend against isolated task worktree]
           |
           +--> progress/idle => update status comment + labels
           +--> emit optional mirror events (in-progress/idle/completed)
@@ -232,6 +259,7 @@ Validated on March 17, 2026:
 - Live protocol validation passed on `dzianisv/codebridge-test` for assignment bootstrap, issue mention, PR conversation mention, and PR review comment mention.
 - Discussion validation still needs a signed synthetic `discussion_comment` fallback on `VibeTechnologies/vibeteam-eval-hello-world` because the app lacks Discussions access there. Run creation is verified through persisted `sourceKey` evidence rather than an app-authored discussion status comment.
 - PR review comment ingestion is now implemented in both webhook and polling paths. Review comments are explicit-command only and reuse the PR conversation thread for lifecycle/status feedback.
-- Backend dispatch is now per repo config. `backend` defaults to `codex`; `opencode` uses the same installation/repo -> `repo.path` resolution before any HTTP call is made.
+- Backend dispatch is per repo config. `backend` defaults to `codex`; `opencode` uses the same installation/repo resolution before any HTTP call is made.
 - OpenCode integration uses server health, session creation, async prompt submission, session-status polling, and message polling. If the terminal assistant message contains only tool output, CodeBridge requests a final text summary in the same session.
 - Live OpenCode validation showed transient untracked artifacts such as `.reflection/`, `.tts/`, and `.tts-debug.log`. Dirty-check and commit staging now ignore those paths so PRs only include intended user changes.
+- GitHub-originated runs now follow the intended repo/worktree lifecycle: clone-on-demand under `$HOME/workspace` plus isolated per-task worktrees.

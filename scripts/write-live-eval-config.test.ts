@@ -25,7 +25,6 @@ describe("buildLiveEvalConfig", () => {
 
   const args = {
     outputPath: "/tmp/out.yaml",
-    repoPath: "/tmp/repo",
     repoFullName: "dzianisv/codebridge-test"
   }
 
@@ -45,6 +44,7 @@ describe("buildLiveEvalConfig", () => {
       model: "opencode/minimax-m2.5-free",
       branchPrefix: "opencodeapp"
     })
+    expect(config.tenants[0]?.repos[0]).not.toHaveProperty("path")
   })
 
   it("passes through an explicit supported opencode model override", () => {

@@ -57,7 +57,7 @@ export type RepoGitHubAppConfig = {
 
 export type RepoConfig = {
   fullName: string
-  path: string
+  path?: string
   backend?: AgentBackend
   agent?: string
   model?: string

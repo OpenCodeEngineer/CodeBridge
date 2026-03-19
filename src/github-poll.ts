@@ -10,7 +10,7 @@ import {
 } from "./command-prefixes.js"
 import { routeDiscussionCommentCommand, routeExplicitGitHubCommand, routeIssueCommentCommand } from "./github-routing.js"
 import { postControlAck, postDiscussionUnsupportedControl, postIssueStatus } from "./github-controls.js"
-import { ensureRepoPath, resolveRepo } from "./repo.js"
+import { resolveRepo } from "./repo.js"
 import { logger } from "./logger.js"
 import { dispatchSessionRelay, resolveSessionIdFromIssue } from "./codex-session-relay.js"
 import {
@@ -22,6 +22,7 @@ import {
   runUsesGithubApp,
   type GitHubAppMap
 } from "./github-apps.js"
+import { createWorkspaceManager, resolveManagedSessionRepoPath, type WorkspaceManager } from "./workspace.js"
 
 export type GitHubPollEnv = {
   githubApps?: GitHubAppMap
@@ -52,6 +53,9 @@ export function startGitHubPolling(params: {
   const intervalMs = Math.max(10000, env.githubPollIntervalSec * 1000)
   const repoPollTimeoutMs = 30_000
   const clientTimeoutMs = 15_000
+  const workspaceManager = createWorkspaceManager({
+    githubApps: env.githubApps
+  })
   logger.info({
     intervalSec: env.githubPollIntervalSec,
     appKeys: configuredApps.map(app => app.key)
@@ -153,7 +157,8 @@ export function startGitHubPolling(params: {
       client,
       store,
       runService,
-      appIdentityPromise: appRuntime.appIdentityPromise
+      appIdentityPromise: appRuntime.appIdentityPromise,
+      workspaceManager
     })
 
     await pollDiscussionComments({
@@ -169,7 +174,8 @@ export function startGitHubPolling(params: {
       runService,
       defaultPrefixesPromise: appRuntime.defaultPrefixesPromise,
       appIdentityPromise: appRuntime.appIdentityPromise,
-      githubPollBackfill: env.githubPollBackfill
+      githubPollBackfill: env.githubPollBackfill,
+      workspaceManager
     })
 
     await pollPullRequestReviewComments({
@@ -187,7 +193,8 @@ export function startGitHubPolling(params: {
       defaultPrefixesPromise: appRuntime.defaultPrefixesPromise,
       appIdentityPromise: appRuntime.appIdentityPromise,
       githubPollBackfill: env.githubPollBackfill,
-      env
+      env,
+      workspaceManager
     })
 
     const pollStateKey = buildGithubPollStateKey({
@@ -228,15 +235,6 @@ export function startGitHubPolling(params: {
       : []
     const issueMetaByNumber = new Map<number, { title: string; body?: string; managed: boolean }>()
     const issueSessionByNumber = new Map<number, string | null>()
-    let resolvedRepoPath: string | null = null
-
-    const getRepoPath = async () => {
-      if (!resolvedRepoPath) {
-        resolvedRepoPath = await ensureRepoPath(repo)
-      }
-      return resolvedRepoPath
-    }
-
     const getIssueMeta = async (issueNumber: number) => {
       const cached = issueMetaByNumber.get(issueNumber)
       if (cached) return cached
@@ -374,7 +372,14 @@ To specify a tenant, use: \`@tenant-id your command here\``
               commentId: comment.id,
               commentBody: comment.body,
               authorLogin: comment.user?.login ?? undefined,
-              repoPath: await getRepoPath(),
+              repoPath: await resolveManagedSessionRepoPath({
+                store,
+                tenantId: tenant.id,
+                repo,
+                owner,
+                repoName,
+                issueNumber
+              }),
               codexPath: env.codexPath,
               codexTurnTimeoutMs: env.codexTurnTimeoutMs,
               postIssueComment: async (body) => {
@@ -402,7 +407,6 @@ To specify a tenant, use: \`@tenant-id your command here\``
         if (existing) continue
 
         const issue = issueMeta
-        const repoPath = await getRepoPath()
         const prompt = command.type === "reply"
           ? buildReplyPrompt(issueNumber, command.prompt)
           : command.prompt
@@ -410,7 +414,20 @@ To specify a tenant, use: \`@tenant-id your command here\``
         await runService.createRun({
           tenantId: tenant.id,
           repoFullName: repo.fullName,
-          repoPath,
+          prepareRepoPath: runId => workspaceManager.prepareRunRepoPath({
+            repo,
+            github: {
+              appKey: appRuntime.appKey,
+              owner,
+              repo: repoName,
+              issueNumber,
+              installationId: githubBinding.installationId,
+              issueTitle: issue.title,
+              issueBody: issue.body,
+              triggerCommentId: comment.id
+            },
+            runId
+          }),
           sourceKey,
           prompt,
           backend: repo.backend,
@@ -474,6 +491,7 @@ async function pollAssignedIssues(input: {
   store: RunStore
   runService: RunService
   appIdentityPromise: Promise<{ slug?: string; botLogin?: string } | null>
+  workspaceManager: WorkspaceManager
 }): Promise<void> {
   const appIdentity = await resolveAppIdentityWithTimeout(input.appIdentityPromise)
   const assignees = resolveAssignmentAssignees(input.githubBinding.assignmentAssignees, appIdentity?.botLogin)
@@ -538,11 +556,22 @@ async function pollAssignedIssues(input: {
     const existing = await input.store.getRunBySourceKey(sourceKey)
     if (existing) continue
 
-    const repoPath = await ensureRepoPath(input.repo)
     await input.runService.createRun({
       tenantId: input.tenant.id,
       repoFullName: input.repo.fullName,
-      repoPath,
+      prepareRepoPath: runId => input.workspaceManager.prepareRunRepoPath({
+        repo: input.repo,
+        github: {
+          appKey: input.appKey,
+          owner: input.owner,
+          repo: input.repoName,
+          issueNumber: issue.number,
+          installationId: input.githubBinding.installationId,
+          issueTitle: issue.title,
+          issueBody: issue.body ?? undefined
+        },
+        runId
+      }),
       sourceKey,
       prompt: buildIssueBootstrapPrompt(issue.number, issue.title, issue.body ?? undefined),
       backend: input.repo.backend,
@@ -576,6 +605,7 @@ async function pollDiscussionComments(input: {
   defaultPrefixesPromise: Promise<string[]>
   appIdentityPromise: Promise<{ slug?: string; botLogin?: string } | null>
   githubPollBackfill: boolean
+  workspaceManager: WorkspaceManager
 }): Promise<void> {
   const discussionPollKey = buildGithubPollStateKey({
     repoFullName: input.repo.fullName,
@@ -735,7 +765,6 @@ async function pollDiscussionComments(input: {
       const existing = await input.store.getRunBySourceKey(sourceKey)
       if (existing) continue
 
-      const repoPath = await ensureRepoPath(input.repo)
       const prompt = command.type === "reply"
         ? buildDiscussionReplyPrompt(comment.discussionNumber, command.prompt)
         : command.prompt
@@ -743,7 +772,19 @@ async function pollDiscussionComments(input: {
       await input.runService.createRun({
         tenantId: input.tenant.id,
         repoFullName: input.repo.fullName,
-        repoPath,
+        prepareRepoPath: runId => input.workspaceManager.prepareRunRepoPath({
+          repo: input.repo,
+          github: {
+            appKey: input.appKey,
+            owner: input.owner,
+            repo: input.repoName,
+            issueNumber: comment.discussionNumber,
+            installationId: input.githubBinding.installationId,
+            issueTitle: comment.discussionTitle,
+            issueBody: comment.discussionBody
+          },
+          runId
+        }),
         sourceKey,
         prompt,
         backend: input.repo.backend,
@@ -795,6 +836,7 @@ async function pollPullRequestReviewComments(input: {
   appIdentityPromise: Promise<{ slug?: string; botLogin?: string } | null>
   githubPollBackfill: boolean
   env: GitHubPollEnv
+  workspaceManager: WorkspaceManager
 }): Promise<void> {
   const reviewPollKey = buildGithubPollStateKey({
     repoFullName: input.repo.fullName,
@@ -857,14 +899,6 @@ async function pollPullRequestReviewComments(input: {
     : []
   const issueMetaByNumber = new Map<number, { title: string; body?: string; managed: boolean }>()
   const issueSessionByNumber = new Map<number, string | null>()
-  let resolvedRepoPath: string | null = null
-
-  const getRepoPath = async () => {
-    if (!resolvedRepoPath) {
-      resolvedRepoPath = await ensureRepoPath(input.repo)
-    }
-    return resolvedRepoPath
-  }
 
   const getIssueMeta = async (issueNumber: number) => {
     const cached = issueMetaByNumber.get(issueNumber)
@@ -1012,7 +1046,14 @@ To specify a tenant, use: \`@tenant-id your command here\``
             commentId: comment.id,
             commentBody: body,
             authorLogin,
-            repoPath: await getRepoPath(),
+            repoPath: await resolveManagedSessionRepoPath({
+              store: input.store,
+              tenantId: input.tenant.id,
+              repo: input.repo,
+              owner: input.owner,
+              repoName: input.repoName,
+              issueNumber
+            }),
             codexPath: input.env.codexPath,
             codexTurnTimeoutMs: input.env.codexTurnTimeoutMs,
             postIssueComment: async (commentBody) => {
@@ -1046,7 +1087,20 @@ To specify a tenant, use: \`@tenant-id your command here\``
       await input.runService.createRun({
         tenantId: input.tenant.id,
         repoFullName: input.repo.fullName,
-        repoPath: await getRepoPath(),
+        prepareRepoPath: runId => input.workspaceManager.prepareRunRepoPath({
+          repo: input.repo,
+          github: {
+            appKey: input.appKey,
+            owner: input.owner,
+            repo: input.repoName,
+            issueNumber,
+            installationId: input.githubBinding.installationId,
+            issueTitle: issueMeta.title,
+            issueBody: issueMeta.body,
+            triggerCommentId: comment.id
+          },
+          runId
+        }),
         sourceKey,
         prompt,
         backend: input.repo.backend,

@@ -87,7 +87,7 @@ Rejected historical note:
 ```bash
 pnpm tsx scripts/eval-customer-flow.ts \
   --repo dzianisv/codebridge-test \
-  --repo-path /absolute/path/to/dedicated/codebridge-test-clone \
+  --workspace-root /absolute/path/to/dedicated/codebridge-workspace \
   --database-url /absolute/path/to/codebridge-eval.db \
   --codex-app-key codex \
   --opencode-app-key opencode \
@@ -95,8 +95,8 @@ pnpm tsx scripts/eval-customer-flow.ts \
   --poll 10
 ```
 
-Use a dedicated test clone for `--repo-path`.
-The eval runner hard-resets and cleans that checkout between cases.
+Use a dedicated workspace root for `--workspace-root`.
+The eval runner clears that workspace root before the first case, then verifies that runs execute from per-task worktree paths under that managed root instead of mutating the base clone directly.
 It resolves the real GitHub App slugs and bot logins from `CODEBRIDGE_EVAL_*` credentials and fails if the resolved identities are shared.
 
 Artifacts are written to `reports/`:
@@ -117,8 +117,8 @@ This workflow:
 1. installs dependencies,
 2. installs `opencode`,
 3. starts `opencode serve` locally on the runner,
-4. generates a temporary CodeBridge config,
-5. starts CodeBridge in polling mode,
+4. generates a temporary CodeBridge config with no fixed `repo.path` for the GitHub test repo,
+5. starts CodeBridge in polling mode with `CODEBRIDGE_WORKSPACE_ROOT`,
 6. runs the live customer-flow eval,
 7. uploads reports and service logs as artifacts.
 
@@ -160,13 +160,12 @@ The workflow uses:
 Inputs:
 
 - `--output`
-- `--repo-path`
 - `--repo`
 
 It writes a tenant config that:
 
 - binds `codex` and `opencode` app keys,
-- maps the test repository to the dedicated checkout path,
+- maps the test repository by `fullName` only so GitHub-originated runs must resolve through the managed workspace root,
 - keeps `codex` as the default route,
 - overrides only the OpenCode route to backend `opencode`,
 - defaults the OpenCode `model` field to `opencode/minimax-m2.5-free` unless `CODEBRIDGE_EVAL_OPENCODE_MODEL` is explicitly set,

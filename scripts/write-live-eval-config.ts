@@ -9,7 +9,6 @@ import { resolveRequiredEvalGithubAppsFromEnv } from "./live-eval-github-apps.js
 
 type Args = {
   outputPath: string
-  repoPath: string
   repoFullName: string
 }
 
@@ -28,7 +27,6 @@ const DEFAULT_LIVE_EVAL_OPENCODE_MODEL = "opencode/minimax-m2.5-free"
 function parseArgs(argv: string[]): Args {
   const args: Args = {
     outputPath: "",
-    repoPath: "",
     repoFullName: process.env.CODEBRIDGE_EVAL_REPO ?? "dzianisv/codebridge-test"
   }
 
@@ -38,9 +36,6 @@ function parseArgs(argv: string[]): Args {
     if (arg === "--output" && next) {
       args.outputPath = next
       index += 1
-    } else if (arg === "--repo-path" && next) {
-      args.repoPath = next
-      index += 1
     } else if (arg === "--repo" && next) {
       args.repoFullName = next
       index += 1
@@ -49,9 +44,6 @@ function parseArgs(argv: string[]): Args {
 
   if (!args.outputPath) {
     throw new Error("Missing --output")
-  }
-  if (!args.repoPath) {
-    throw new Error("Missing --repo-path")
   }
 
   return args
@@ -123,7 +115,6 @@ export function buildLiveEvalConfig(input: {
         repos: [
           {
             fullName: args.repoFullName,
-            path: args.repoPath,
             backend: "codex",
             model: models.codexModel,
             baseBranch: "main",

@@ -134,13 +134,13 @@ tenants:
     name: Test
     repos:
       - fullName: org/repo
-        path: /tmp/repo
 `
     await fs.writeFile(configPath, yaml)
     const config = await loadConfig(configPath)
     expect(config.tenants).toHaveLength(1)
     expect(config.tenants[0].id).toBe("test-tenant")
     expect(config.tenants[0].repos[0].fullName).toBe("org/repo")
+    expect(config.tenants[0].repos[0].path).toBeUndefined()
     await fs.rm(tmpDir, { recursive: true })
   })
 

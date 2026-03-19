@@ -17,7 +17,8 @@ export type RunService = {
   createRun: (input: {
     tenantId: string
     repoFullName: string
-    repoPath: string
+    repoPath?: string
+    prepareRepoPath?: (runId: string) => Promise<string>
     sourceKey?: string
     prompt: string
     backend?: AgentBackend
@@ -42,7 +43,8 @@ export function createRunService(params: {
   const createRun = async (input: {
     tenantId: string
     repoFullName: string
-    repoPath: string
+    repoPath?: string
+    prepareRepoPath?: (runId: string) => Promise<string>
     sourceKey?: string
     prompt: string
     backend?: AgentBackend
@@ -52,6 +54,11 @@ export function createRunService(params: {
     slack?: SlackContext
     github?: GitHubContext
   }) => {
+    if (input.sourceKey) {
+      const existing = await store.getRunBySourceKey(input.sourceKey)
+      if (existing) return existing
+    }
+
     const id = nanoid(8)
     let github = input.github ? { ...input.github } : undefined
     let githubClient: Awaited<ReturnType<NonNullable<typeof getGitHubClient>>> | null = null
@@ -88,11 +95,16 @@ export function createRunService(params: {
       }
     }
 
+    const repoPath = input.repoPath ?? await input.prepareRepoPath?.(id)
+    if (!repoPath) {
+      throw new Error(`Run ${id} is missing a resolved repo path`)
+    }
+
     const run = await store.createRun({
       id,
       tenantId: input.tenantId,
       repoFullName: input.repoFullName,
-      repoPath: input.repoPath,
+      repoPath,
       sourceKey: input.sourceKey,
       prompt: input.prompt,
       backend: resolveAgentBackend(input.backend),

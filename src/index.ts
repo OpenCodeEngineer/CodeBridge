@@ -7,13 +7,14 @@ import { createRunService } from "./run-service.js"
 import { createRunner } from "./runner.js"
 import { startSlack } from "./slack.js"
 import { createGitHubApp } from "./github.js"
-import { resolveRepo, ensureRepoPath } from "./repo.js"
+import { resolveRepo } from "./repo.js"
 import { logger } from "./logger.js"
 import { startGitHubPolling } from "./github-poll.js"
 import { createCodexNotifyHandler } from "./codex-notify.js"
 import type { AppConfig } from "./types.js"
 import { createVibeAgentsSink } from "./vibe-agents.js"
 import { getTenantGithubAppBinding, type GitHubAppMap, selectGithubAppKeyForBackend } from "./github-apps.js"
+import { createWorkspaceManager } from "./workspace.js"
 
 const main = async () => {
   const env = loadEnv()
@@ -34,6 +35,9 @@ const main = async () => {
     slackClient,
     githubApps: secrets.githubApps,
     vibeAgents: vibeAgentsSink
+  })
+  const workspaceManager = createWorkspaceManager({
+    githubApps: secrets.githubApps
   })
 
   if (env.role === "all" || env.role === "worker") {
@@ -74,7 +78,6 @@ const main = async () => {
       if (!tenant) return
       const repo = resolveRepo(tenant, input.repoFullName, input.github.appKey)
       if (!repo) return
-      const repoPath = await ensureRepoPath(repo)
       const prompt = input.commandType === "reply"
         ? [`Follow-up command from GitHub issue #${input.github.issueNumber}:`, input.prompt].join("\n\n")
         : input.prompt
@@ -82,7 +85,11 @@ const main = async () => {
       await runService.createRun({
         tenantId: tenant.id,
         repoFullName: repo.fullName,
-        repoPath,
+        prepareRepoPath: runId => workspaceManager.prepareRunRepoPath({
+          repo,
+          github: input.github,
+          runId
+        }),
         sourceKey: input.sourceKey,
         prompt,
         backend: repo.backend,
@@ -111,7 +118,6 @@ const main = async () => {
       if (!tenant) return
       const repo = resolveRepo(tenant, input.repoHint)
       if (!repo) return
-      const repoPath = await ensureRepoPath(repo)
       const [owner, repoName] = repo.fullName.split("/")
       const backend = repo.backend ?? "codex"
       const appKey = selectGithubAppKeyForBackend(tenant, repo, backend)
@@ -127,7 +133,11 @@ const main = async () => {
       await runService.createRun({
         tenantId: tenant.id,
         repoFullName: repo.fullName,
-        repoPath,
+        prepareRepoPath: runId => workspaceManager.prepareRunRepoPath({
+          repo,
+          github: githubContext,
+          runId
+        }),
         prompt: input.prompt,
         backend,
         agent: repo.agent,

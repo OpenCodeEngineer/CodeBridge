@@ -28,6 +28,7 @@ import {
   runUsesGithubApp,
   type GitHubAppMap
 } from "./github-apps.js"
+import { resolveManagedSessionRepoPath } from "./workspace.js"
 
 export type GitHubCommandHandler = (input: {
   tenantId: string
@@ -170,7 +171,14 @@ export function createGitHubApp(
               commentId: context.payload.comment.id,
               commentBody: context.payload.comment.body ?? "",
               authorLogin,
-              repoPath: repo.path,
+              repoPath: await resolveManagedSessionRepoPath({
+                store,
+                tenantId: tenant.id,
+                repo,
+                owner: context.payload.repository.owner.login,
+                repoName: context.payload.repository.name,
+                issueNumber: context.payload.issue.number
+              }),
               codexPath: env.codexPath,
               codexTurnTimeoutMs: env.codexTurnTimeoutMs,
               postIssueComment: async (replyBody) => {
@@ -337,7 +345,14 @@ export function createGitHubApp(
               commentId: context.payload.comment.id,
               commentBody: context.payload.comment.body ?? "",
               authorLogin,
-              repoPath: repo.path,
+              repoPath: await resolveManagedSessionRepoPath({
+                store,
+                tenantId: tenant.id,
+                repo,
+                owner,
+                repoName,
+                issueNumber
+              }),
               codexPath: env.codexPath,
               codexTurnTimeoutMs: env.codexTurnTimeoutMs,
               postIssueComment: async (commentBody) => {

@@ -25,7 +25,7 @@ type AgentBackend = "codex" | "opencode"
 
 type Args = {
   repo: string
-  repoPath?: string
+  workspaceRoot?: string
   databaseUrl?: string
   only: "all" | "codex" | "opencode"
   codexHandle?: string
@@ -81,10 +81,20 @@ type DbRunEvidence = {
   status: string
   backend: string
   githubAppKey?: string
+  repoPath?: string
   prUrl?: string
   branchName?: string
   createdAt: string
   updatedAt: string
+}
+
+type WorkspaceVerification = {
+  workspaceRoot: string
+  expectedBaseClonePath: string
+  repoPath: string
+  repoPathWithinWorkspace: boolean
+  repoPathUsesWorktreeLayout: boolean
+  repoPathEqualsBaseClone: boolean
 }
 
 type PrDetails = {
@@ -144,6 +154,7 @@ type CaseCollected = {
   linkedPrAuthorMatchesExpectedBot?: boolean
   linkedPrBody?: string
   dbRun?: DbRunEvidence | null
+  workspaceVerification?: WorkspaceVerification
   knowledgeVerification?: KnowledgeVerification
   prVerification?: PrVerification
   botResponseMentionsPr: boolean
@@ -162,7 +173,7 @@ const RUN_COMMENT_RE = /\b(?:codex|opencode)\s+run\b/i
 function parseArgs(argv: string[]): Args {
   const args: Args = {
     repo: "dzianisv/codebridge-test",
-    repoPath: undefined,
+    workspaceRoot: undefined,
     databaseUrl: undefined,
     only: "all",
     codexHandle: undefined,
@@ -182,8 +193,8 @@ function parseArgs(argv: string[]): Args {
     if (arg === "--repo" && next) {
       args.repo = next
       index += 1
-    } else if (arg === "--repo-path" && next) {
-      args.repoPath = next
+    } else if (arg === "--workspace-root" && next) {
+      args.workspaceRoot = next
       index += 1
     } else if (arg === "--database-url" && next) {
       args.databaseUrl = next
@@ -263,16 +274,10 @@ function normalizeHandle(value: string): string {
   return value.startsWith("@") ? value : `@${value}`
 }
 
-function cleanRepo(repoPath: string | undefined): void {
-  if (!repoPath) return
-  const reset = runCommand("git", ["-C", repoPath, "reset", "--hard", "HEAD"])
-  if (reset.exitCode !== 0) {
-    throw new Error(`Failed git reset in ${repoPath}: ${reset.stderr || reset.stdout}`)
-  }
-  const clean = runCommand("git", ["-C", repoPath, "clean", "-fd"])
-  if (clean.exitCode !== 0) {
-    throw new Error(`Failed git clean in ${repoPath}: ${clean.stderr || clean.stdout}`)
-  }
+function cleanWorkspaceRoot(workspaceRoot: string | undefined): void {
+  if (!workspaceRoot) return
+  rmSync(workspaceRoot, { recursive: true, force: true })
+  mkdirSync(workspaceRoot, { recursive: true })
 }
 
 function createIssue(repo: string, title: string, body: string): IssueRef {
@@ -510,7 +515,7 @@ async function readLatestRun(
         ? ` AND github_trigger_comment_id IN (${activeTriggerIds.map(() => "?").join(",")})`
         : ""
       const row = db.prepare(
-        `SELECT id, status, backend, github_app_key, pr_url, branch_name, created_at, updated_at
+        `SELECT id, status, backend, github_app_key, repo_path, pr_url, branch_name, created_at, updated_at
          FROM runs
          WHERE repo_full_name = ? AND github_issue_number = ?${clause}
          ORDER BY datetime(created_at) DESC
@@ -521,6 +526,7 @@ async function readLatestRun(
             status: string
             backend: string
             github_app_key?: string
+            repo_path?: string
             pr_url?: string
             branch_name?: string
             created_at: string
@@ -533,6 +539,7 @@ async function readLatestRun(
         status: row.status,
         backend: row.backend,
         githubAppKey: row.github_app_key ?? undefined,
+        repoPath: row.repo_path ?? undefined,
         prUrl: row.pr_url ?? undefined,
         branchName: row.branch_name ?? undefined,
         createdAt: String(row.created_at),
@@ -550,7 +557,7 @@ async function readLatestRun(
       ? ` AND github_trigger_comment_id = ANY($3)`
       : ""
     const result = await pool.query(
-      `SELECT id, status, backend, github_app_key, pr_url, branch_name, created_at, updated_at
+      `SELECT id, status, backend, github_app_key, repo_path, pr_url, branch_name, created_at, updated_at
        FROM runs
        WHERE repo_full_name = $1 AND github_issue_number = $2${triggerClause}
        ORDER BY created_at DESC
@@ -564,6 +571,7 @@ async function readLatestRun(
       status: row.status,
       backend: row.backend,
       githubAppKey: row.github_app_key ?? undefined,
+      repoPath: row.repo_path ?? undefined,
       prUrl: row.pr_url ?? undefined,
       branchName: row.branch_name ?? undefined,
       createdAt: new Date(row.created_at).toISOString(),
@@ -929,6 +937,56 @@ function assertCollectedIdentityEvidence(results: CaseCollected[]) {
   }
 }
 
+function verifyWorkspaceRunPath(input: {
+  repo: string
+  repoPath: string
+  workspaceRoot: string
+}): WorkspaceVerification {
+  const repoName = input.repo.split("/")[1]
+  if (!repoName) {
+    throw new Error(`Unable to derive repo name from ${input.repo}`)
+  }
+
+  const normalizedWorkspaceRoot = path.resolve(input.workspaceRoot)
+  const normalizedRepoPath = path.resolve(input.repoPath)
+  const expectedBaseClonePath = path.join(normalizedWorkspaceRoot, repoName)
+  const expectedWorktreeRoot = path.join(normalizedWorkspaceRoot, ".codebridge", "worktrees")
+
+  return {
+    workspaceRoot: normalizedWorkspaceRoot,
+    expectedBaseClonePath,
+    repoPath: normalizedRepoPath,
+    repoPathWithinWorkspace: normalizedRepoPath.startsWith(`${normalizedWorkspaceRoot}${path.sep}`),
+    repoPathUsesWorktreeLayout:
+      normalizedRepoPath.startsWith(`${expectedWorktreeRoot}${path.sep}`),
+    repoPathEqualsBaseClone: normalizedRepoPath === expectedBaseClonePath
+  }
+}
+
+function assertWorkspaceEvidence(results: CaseCollected[]) {
+  for (const entry of results) {
+    if (!entry.workspaceVerification) continue
+
+    if (!entry.workspaceVerification.repoPathWithinWorkspace) {
+      throw new Error(
+        `Hard-gate eval requires ${entry.caseId} to run inside the managed workspace root, got ${entry.workspaceVerification.repoPath}.`
+      )
+    }
+
+    if (!entry.workspaceVerification.repoPathUsesWorktreeLayout) {
+      throw new Error(
+        `Hard-gate eval requires ${entry.caseId} to use a per-task worktree path, got ${entry.workspaceVerification.repoPath}.`
+      )
+    }
+
+    if (entry.workspaceVerification.repoPathEqualsBaseClone) {
+      throw new Error(
+        `Hard-gate eval requires ${entry.caseId} to avoid mutating the base clone directly, got ${entry.workspaceVerification.repoPath}.`
+      )
+    }
+  }
+}
+
 function parsePromptfooCounts(payload: any): { passed: number; failed: number; errors: number } {
   const stats = payload?.results?.stats ?? payload?.stats
   if (stats) {
@@ -988,6 +1046,10 @@ function writeMarkdownReport(input: {
     if (entry.latestBotCommentUrl) lines.push(`- Final bot comment: ${entry.latestBotCommentUrl}`)
     lines.push(`- Expected backend/app: ${entry.expectedBackend} / ${entry.expectedAppKey}`)
     lines.push(`- DB run: ${entry.dbRun ? `${entry.dbRun.id} (${entry.dbRun.status}, backend=${entry.dbRun.backend}, appKey=${entry.dbRun.githubAppKey ?? "n/a"})` : "missing"}`)
+    if (entry.workspaceVerification) {
+      lines.push(`- Workspace path: ${entry.workspaceVerification.repoPath}`)
+      lines.push(`- Workspace worktree evidence: withinRoot=${entry.workspaceVerification.repoPathWithinWorkspace}, worktreeLayout=${entry.workspaceVerification.repoPathUsesWorktreeLayout}, equalsBaseClone=${entry.workspaceVerification.repoPathEqualsBaseClone}`)
+    }
     if (entry.linkedPrUrl) lines.push(`- PR: ${entry.linkedPrUrl}`)
     if (entry.knowledgeVerification) {
       lines.push(`- Knowledge answer evidence: 2018=${entry.knowledgeVerification.answerHas2018}, June 2018=${entry.knowledgeVerification.answerHasJune2018}, GPT-1=${entry.knowledgeVerification.mentionsGpt1}`)
@@ -1016,9 +1078,12 @@ async function main() {
   if (args.databaseUrl) {
     console.log(`[customer-flow-eval] database=${args.databaseUrl}`)
   }
+  if (args.workspaceRoot) {
+    console.log(`[customer-flow-eval] workspaceRoot=${args.workspaceRoot}`)
+    cleanWorkspaceRoot(args.workspaceRoot)
+  }
 
   for (const missionCase of cases) {
-    cleanRepo(args.repoPath)
     const issue = createIssue(
       args.repo,
       `[eval] ${missionCase.title} (${Date.now()})`,
@@ -1095,6 +1160,14 @@ async function main() {
       linkedPrAuthorMatchesExpectedBot,
       linkedPrBody: prDetails?.body,
       dbRun,
+      workspaceVerification:
+        args.workspaceRoot && dbRun?.repoPath
+          ? verifyWorkspaceRunPath({
+              repo: args.repo,
+              repoPath: dbRun.repoPath,
+              workspaceRoot: args.workspaceRoot
+            })
+          : undefined,
       knowledgeVerification:
         missionCase.verificationKind === "knowledge"
           ? verifyKnowledgeResponse(bot.combined, linkedPr?.url)
@@ -1111,11 +1184,10 @@ async function main() {
       botResponseMentionsPr: textMentionsUrl(bot.combined, linkedPr?.url),
       rubric: missionCase.rubric
     })
-
-    cleanRepo(args.repoPath)
   }
 
   assertCollectedIdentityEvidence(collected)
+  assertWorkspaceEvidence(collected)
 
   const tests = buildEvalTests(collected)
   const promptfooConfig = {
