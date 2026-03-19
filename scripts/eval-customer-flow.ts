@@ -834,7 +834,8 @@ function buildEvalTests(results: CaseCollected[]) {
         type: "javascript",
         value: [
           "const obj = JSON.parse(output);",
-          "return obj.triggerCommentUsesExpectedHandle === true;"
+          "return obj.triggerCommentUsesExpectedHandle === true",
+          "&& obj.triggerCommentRenderedMentionLink === true;"
         ].join("\n")
       },
       {
@@ -948,6 +949,12 @@ function assertCollectedIdentityEvidence(results: CaseCollected[]) {
 
     if (!entry.triggerCommentUsesExpectedHandle) {
       throw new Error(`Hard-gate eval requires the real GitHub App handle in the trigger comment for ${entry.caseId}.`)
+    }
+
+    if (!entry.triggerCommentRenderedMentionLink) {
+      throw new Error(
+        `Hard-gate eval requires GitHub to render the trigger comment as a real highlighted mention for ${entry.caseId}.`
+      )
     }
 
     if (!entry.botCommentAuthorsMatchExpected || entry.botCommentAuthorLogins.length === 0) {

@@ -12,6 +12,14 @@ A mission is **NOT** complete until all of the following are true:
 If evaluation fails, the mission remains **in progress**.
 Do not mark mission complete, do not claim completion, and do not close completion updates until evaluation passes.
 
+Partial success does **not** count.
+If one acceptance check passes and another fails, the overall result is **fail** and work must continue.
+Do not stop at "mostly working", "routing passed", or any other partial-green state.
+The only completion state is: every hard-gate acceptance check passed in the same evaluation run.
+
+If a hard-gate check appears blocked by external platform behavior, do not silently relax the requirement.
+Keep the mission marked **not completed**, capture the failing evaluation evidence, document the blocker precisely, and continue investigating or escalate the requirement mismatch explicitly.
+
 ## Evaluation Quality Requirements
 
 - Always validate that eval scenarios are correct for the feature that was asked to implement.

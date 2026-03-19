@@ -387,7 +387,7 @@ The mention handle must be the exact real installed GitHub App slug.
 Do not rely on arbitrary text aliases for GitHub comment bootstrap or explicit GitHub commands.
 CodeBridge now refuses configured alias fallback for GitHub comment routing when app identity lookup is unavailable; it will ignore the command rather than guess.
 GitHub currently renders GitHub App slug tokens as plain text in issue/PR/discussion comment HTML instead of `<a class="user-mention">` links, so the bridge treats the exact resolved `@<app-slug>` text as the command token and proves authorship with matching app-authored responses plus `performed_via_github_app`.
-If clickable highlighted `@mentions` for GitHub Apps are a hard product requirement, treat that as a GitHub-platform limitation rather than a CodeBridge routing feature.
+If clickable highlighted `@mentions` for GitHub Apps are a hard product requirement, keep the mission open and let the live gate fail until GitHub actually renders `user-mention` links for the trigger comments.
 
 ### Follow-up
 

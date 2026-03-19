@@ -17,7 +17,7 @@ It is only valid when:
 - the two app keys resolve to distinct app ids, slugs, and bot authors.
 
 Shared credentials under two different `appKey` names are not accepted.
-For this gate, "real handle" means the exact `@<app-slug>` resolved from the GitHub App identity. GitHub currently renders GitHub App slug tokens as plain text in issue/PR/discussion comment `body_html` instead of `<a class="user-mention">` links, so the evaluator checks exact slug text plus matching app-authored responses and `performed_via_github_app` evidence rather than UI highlighting alone.
+For this gate, "real handle" means the exact `@<app-slug>` resolved from the GitHub App identity. GitHub currently renders GitHub App slug tokens as plain text in issue/PR/discussion comment `body_html` instead of `<a class="user-mention">` links, but this hard gate now treats highlighted mention rendering as a required acceptance condition. The mission remains incomplete until the trigger comments are both exact-handle matches and real rendered `user-mention` links.
 
 1. `@<real-codex-app-slug>` issue flow
    - posts a GitHub issue command
@@ -42,7 +42,7 @@ It checks three evidence layers:
 
 - GitHub-visible evidence
   - trigger comment starts with the real GitHub App handle
-  - trigger comment `body_html` is captured so the report can prove whether GitHub rendered a user-mention link or only plain handle text
+  - trigger comment `body_html` is captured and must contain a real rendered user-mention link for the expected handle
   - issue URL
   - final bot comment URL
   - final issue-thread bot author matches the expected app
@@ -153,7 +153,7 @@ Important:
 
 - the hard gate no longer accepts configured alias prefixes such as `@OpenCodeEvalApp`
 - it derives the real handles from the GitHub App slugs
-- it records whether GitHub rendered a user-mention link in the trigger comment HTML, but it does not treat missing linkification as a bridge failure because GitHub App slugs currently render as plain text
+- it now fails if GitHub does not render the trigger comment as a real `user-mention` link for the expected app handle
 - it fails fast if Codex and OpenCode resolve to the same app id, slug, or bot login
 - it fails if the collected issue-thread authors, `performed_via_github_app` slugs, or PR author do not match the expected real GitHub App identity
 
