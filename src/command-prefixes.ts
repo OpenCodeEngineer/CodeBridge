@@ -77,14 +77,10 @@ export function buildGithubCommandPrefixes(input: {
   assignmentAssignees?: string[]
   defaultPrefixes?: string[]
 }): string[] {
-  const defaults = filterGithubMentionPrefixes(input.defaultPrefixes)
-  if (defaults.length > 0) {
-    // When the app slug can be resolved from GitHub, comment-trigger routing must
-    // use that exact real handle only. Configured aliases and assignment handles
-    // must not widen the accepted bootstrap surface.
-    return defaults
-  }
-  return filterGithubMentionPrefixes(input.configured)
+  // GitHub comment routing is strict: only the live app slug resolved from GitHub
+  // is accepted. If identity resolution fails, we would rather ignore the command
+  // than widen routing to a guessed alias from config.
+  return filterGithubMentionPrefixes(input.defaultPrefixes)
 }
 
 function buildDefaultGithubCommandPrefixes(identity?: GitHubAppIdentity): string[] {

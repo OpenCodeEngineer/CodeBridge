@@ -29,9 +29,9 @@ Make GitHub issue and PR conversation threads behave like a chat surface with th
 - The bootstrap action must be treated as a run request without requiring CLI access.
 - If repository/org policy does not allow assigning the App bot as assignee, mention-based bootstrap is the required fallback.
 - For GitHub comment-triggered bootstrap and explicit commands, the accepted handle must be the exact resolved GitHub App slug token (`@<app-slug>`), not an arbitrary configured alias.
-- If GitHub App identity resolution is temporarily unavailable, a configured `commandPrefixes` fallback is acceptable only when it equals the real slug exactly.
+- If GitHub App identity resolution is temporarily unavailable, CodeBridge must not widen GitHub comment routing to configured aliases. It should ignore the comment rather than guess.
 - `github.assignmentAssignees` are for assignment bootstrap only. They must not widen accepted GitHub comment prefixes.
-- GitHub may render the exact app slug token as plain text rather than an inline mention link in the issue body, so validity is defined by exact slug match plus matching app-authored response, not by UI highlighting alone.
+- GitHub currently renders GitHub App slug tokens as plain text in issue/PR/discussion comment HTML instead of `<a class="user-mention">` links. Validity is therefore defined by exact slug match plus matching app-authored response and `performed_via_github_app` evidence, not by UI highlighting.
 
 ### R2. Conversational Mode After Bootstrap
 

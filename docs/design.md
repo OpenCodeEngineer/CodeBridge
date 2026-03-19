@@ -36,7 +36,7 @@ Non-GitHub entrypoints can still use `repos[].path` directly when no GitHub repo
 4. PR review comments and discussion threads remain explicit-command surfaces; follow-up comments there still require the exact app slug handle.
 5. Bridge executes the configured backend against the resolved local task worktree and writes status/answers back to the originating GitHub thread.
 
-For GitHub comment routing, "real handle" means the exact `@<app-slug>` token resolved from the GitHub App identity (`GET /app`), not an arbitrary configured alias. GitHub may still render that token as plain text instead of an inline mention link in the issue body, so validity is defined by exact slug match plus matching app-authored response, not by UI highlighting alone. If GitHub App identity resolution is temporarily unavailable, CodeBridge may fall back to configured `commandPrefixes`, but those values must still equal the real slug exactly.
+For GitHub comment routing, "real handle" means the exact `@<app-slug>` token resolved from the GitHub App identity (`GET /app`), not an arbitrary configured alias. GitHub currently renders GitHub App slug tokens as plain text in issue/PR/discussion comment HTML instead of `<a class="user-mention">` links, so validity is defined by exact slug match plus matching app-authored response and `performed_via_github_app` evidence, not by UI highlighting. If GitHub App identity resolution is temporarily unavailable, CodeBridge now ignores the command instead of widening routing to configured aliases.
 
 ## Routing Rules
 
@@ -100,6 +100,7 @@ Backend dispatch happens only after this repo resolution completes. The selected
 - Run records persist `github.appKey`, and all outbound GitHub writes reuse that same app identity.
 - Explicit mention of a second app on a managed thread starts a new run for that app instead of relaying into the prior app’s session.
 - `assignmentAssignees` are assignment/bootstrap aids only. They must not widen the accepted comment mention prefixes on GitHub surfaces.
+- Configured `commandPrefixes` no longer act as GitHub comment-routing fallbacks. The resolved live app slug is the only accepted GitHub comment handle.
 
 ## Agent Backend Selection
 

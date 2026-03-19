@@ -145,4 +145,4 @@ March 18, 2026 correction:
 - local issues [#542](https://github.com/dzianisv/codebridge-test/issues/542) and [#543](https://github.com/dzianisv/codebridge-test/issues/543) proved the route/backend flow only
 - they did **not** satisfy the distinct-app requirement because the final author was still `codexengineer[bot]`
 - the hard-gate evaluator and config generator now reject that setup and require distinct real app handles and bot authors for `codex` and `opencode`
-- the hard gate now also fails if the trigger comment does not start with the real handle, if issue-thread replies are authored by the wrong bot, or if the OpenCode PR author is not the expected OpenCode app
+- the hard gate now also fails if the trigger comment does not start with the real handle, if issue-thread replies are authored by the wrong bot, if `performed_via_github_app.slug` does not match the expected app, or if the OpenCode PR author is not the expected OpenCode app

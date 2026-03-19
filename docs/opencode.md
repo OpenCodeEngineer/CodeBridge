@@ -183,13 +183,14 @@ Validated on March 17, 2026:
   - resulting PR: `dzianisv/codebridge-test#544`
   - this remained route/backend proof only because the final GitHub author was still `codexengineer[bot]`
 - Passing distinct-app hard-gate proof:
-  - issue: `dzianisv/codebridge-test#560`
-  - run id: `pguKDmKk`
+  - issue: `dzianisv/codebridge-test#571`
+  - run id: `sHZ48JwO`
   - final status comment includes the PR URL plus command results for `bun test` and `bun run src/main.ts`
-  - resulting PR: `dzianisv/codebridge-test#561`
+  - resulting PR: `dzianisv/codebridge-test#572`
   - final issue-thread bot author: `opencodebridgeapp[bot]`
+  - final issue-thread `performed_via_github_app.slug`: `opencodebridgeapp`
   - PR author: `app/opencodebridgeapp`
-  - persisted result: `status=succeeded`, `backend=opencode`, `github_app_key=opencode`, `pr_url=https://github.com/dzianisv/codebridge-test/pull/561`
+  - persisted result: `status=succeeded`, `backend=opencode`, `github_app_key=opencode`, `pr_url=https://github.com/dzianisv/codebridge-test/pull/572`
 
 ## Tradeoffs
 

@@ -191,13 +191,13 @@ secrets:
       privateKey: "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
       webhookSecret: "your-codex-webhook-secret"
       commandPrefixes:
-        - "your-real-codex-app-slug"      # optional fallback only; must equal the real GitHub App slug exactly
+        - "your-real-codex-app-slug"      # optional traceability value; keep it equal to the real GitHub App slug
     opencode:
       appId: 234567
       privateKey: "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
       webhookSecret: "your-opencode-webhook-secret"
       commandPrefixes:
-        - "your-real-opencode-app-slug"   # optional fallback only; must equal the real GitHub App slug exactly
+        - "your-real-opencode-app-slug"   # optional traceability value; keep it equal to the real GitHub App slug
 
 tenants:
   - id: local
@@ -210,7 +210,7 @@ tenants:
           installationId: 23456789         # real OpenCode app installation id
     repos:
       - fullName: "your-org/your-repo"
-        path: "/absolute/path/to/local/clone"
+        path: "/absolute/path/to/local/clone" # optional; only needed for non-GitHub entrypoints
         backend: "codex"                  # default backend when no app-specific override exists
         model: "gpt-5.2-codex"
         githubApps:
@@ -385,7 +385,9 @@ If you run multiple apps on the same repo, mention the app you want:
 
 The mention handle must be the exact real installed GitHub App slug.
 Do not rely on arbitrary text aliases for GitHub comment bootstrap or explicit GitHub commands.
-GitHub may still render the exact app slug token as plain text instead of an inline mention link in the issue body, so validity is based on exact slug text plus matching app-authored response, not UI highlighting alone.
+CodeBridge now refuses configured alias fallback for GitHub comment routing when app identity lookup is unavailable; it will ignore the command rather than guess.
+GitHub currently renders GitHub App slug tokens as plain text in issue/PR/discussion comment HTML instead of `<a class="user-mention">` links, so the bridge treats the exact resolved `@<app-slug>` text as the command token and proves authorship with matching app-authored responses plus `performed_via_github_app`.
+If clickable highlighted `@mentions` for GitHub Apps are a hard product requirement, treat that as a GitHub-platform limitation rather than a CodeBridge routing feature.
 
 ### Follow-up
 
@@ -428,7 +430,7 @@ It proves two user-facing GitHub flows end to end:
 
 It verifies:
 
-- GitHub-visible evidence: the trigger comment used the real handle, the expected bot replied on the issue thread, and the OpenCode PR author matches the expected app
+- GitHub-visible evidence: the trigger comment used the real handle, the evaluator captured the rendered `body_html` for that trigger, the expected bot replied on the issue thread, the reply `performed_via_github_app` matches the expected app slug, and the OpenCode PR author matches the expected app
 - persistence evidence: `backend`, `github_app_key`, and final run status from the live bridge database
 - workspace evidence: the persisted `repo_path` is inside the managed workspace root and uses the per-task worktree layout instead of the base clone path
 - executable PR verification: `bun test` and `bun run src/main.ts` on the generated PR branch

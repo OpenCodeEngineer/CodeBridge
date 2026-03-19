@@ -96,14 +96,12 @@ describe("buildGithubCommandPrefixes", () => {
     expect(result).toEqual(["@codexapp"])
   })
 
-  it("falls back to configured prefixes only when the real app handle is unavailable", () => {
+  it("refuses configured alias fallbacks when the real app handle is unavailable", () => {
     const result = buildGithubCommandPrefixes({
       configured: ["CodexApp", "@custom"],
       assignmentAssignees: ["openai-code-agent"]
     })
 
-    expect(result).toContain("@CodexApp")
-    expect(result).toContain("@custom")
-    expect(result).not.toContain("@openai-code-agent")
+    expect(result).toEqual([])
   })
 })

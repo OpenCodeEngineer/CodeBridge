@@ -17,7 +17,7 @@ It is only valid when:
 - the two app keys resolve to distinct app ids, slugs, and bot authors.
 
 Shared credentials under two different `appKey` names are not accepted.
-For this gate, "real handle" means the exact `@<app-slug>` resolved from the GitHub App identity. GitHub may render that token as plain text instead of an inline mention link in the issue body, so the evaluator checks exact slug text plus matching app-authored responses rather than UI highlighting alone.
+For this gate, "real handle" means the exact `@<app-slug>` resolved from the GitHub App identity. GitHub currently renders GitHub App slug tokens as plain text in issue/PR/discussion comment `body_html` instead of `<a class="user-mention">` links, so the evaluator checks exact slug text plus matching app-authored responses and `performed_via_github_app` evidence rather than UI highlighting alone.
 
 1. `@<real-codex-app-slug>` issue flow
    - posts a GitHub issue command
@@ -42,9 +42,11 @@ It checks three evidence layers:
 
 - GitHub-visible evidence
   - trigger comment starts with the real GitHub App handle
+  - trigger comment `body_html` is captured so the report can prove whether GitHub rendered a user-mention link or only plain handle text
   - issue URL
   - final bot comment URL
   - final issue-thread bot author matches the expected app
+  - final issue-thread `performed_via_github_app.slug` matches the expected app slug
   - PR URL
   - PR author matches the expected app for the OpenCode route
   - PR body linkage
@@ -69,12 +71,15 @@ Promptfoo then uses `azure:chat:gpt-4.1` as the judge on the collected JSON evid
 
 Latest passing distinct-app proof from this branch:
 
-- March 18, 2026 local hard-gate run:
-  - Codex issue flow: `dzianisv/codebridge-test#559`
-  - OpenCode issue-to-PR flow: `dzianisv/codebridge-test#560` -> `#561`
+- March 19, 2026 local hard-gate run:
+  - Codex issue flow: `dzianisv/codebridge-test#570`
+  - OpenCode issue-to-PR flow: `dzianisv/codebridge-test#571` -> `#572`
   - Codex reply author: `codexengineer[bot]`
+  - Codex reply `performed_via_github_app.slug`: `codexengineer`
   - OpenCode reply author: `opencodebridgeapp[bot]`
+  - OpenCode reply `performed_via_github_app.slug`: `opencodebridgeapp`
   - OpenCode PR author: `app/opencodebridgeapp`
+  - persisted worktree paths: both runs used `$WORKSPACE_ROOT/.codebridge/worktrees/<owner>__<repo>/<run-id>`
 
 Rejected historical note:
 
@@ -148,8 +153,9 @@ Important:
 
 - the hard gate no longer accepts configured alias prefixes such as `@OpenCodeEvalApp`
 - it derives the real handles from the GitHub App slugs
+- it records whether GitHub rendered a user-mention link in the trigger comment HTML, but it does not treat missing linkification as a bridge failure because GitHub App slugs currently render as plain text
 - it fails fast if Codex and OpenCode resolve to the same app id, slug, or bot login
-- it fails if the collected issue-thread authors or PR author do not match the expected real GitHub App bot
+- it fails if the collected issue-thread authors, `performed_via_github_app` slugs, or PR author do not match the expected real GitHub App identity
 
 ## Temporary Config Generator
 
@@ -169,4 +175,4 @@ It writes a tenant config that:
 - keeps `codex` as the default route,
 - overrides only the OpenCode route to backend `opencode`,
 - defaults the OpenCode `model` field to `opencode/minimax-m2.5-free` unless `CODEBRIDGE_EVAL_OPENCODE_MODEL` is explicitly set,
-- binds the real GitHub App slugs as the accepted mention prefixes for the eval run.
+- stores the real GitHub App slugs in config for traceability, while the live bridge still resolves the accepted GitHub comment handle from `GET /app` at runtime.

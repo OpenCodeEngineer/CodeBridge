@@ -7,7 +7,6 @@ export type KnowledgeVerification = {
 }
 
 const GITHUB_HANDLE_RE = /^[A-Za-z0-9-]+$/
-
 export function normalizeBotLogins(raw: string): string[] {
   const seed = raw
     .split(",")
@@ -73,6 +72,26 @@ export function textStartsWithHandle(text: string, handle: string): boolean {
   if (!normalizedHandle) return false
   const normalizedText = text.trimStart().toLowerCase()
   return normalizedText === normalizedHandle || normalizedText.startsWith(`${normalizedHandle} `) || normalizedText.startsWith(`${normalizedHandle}\n`)
+}
+
+export function renderedHtmlHasHandleUserMentionLink(html: string | undefined, handle: string): boolean {
+  if (!html?.trim()) return false
+  const normalizedHandle = normalizeHandle(handle)
+  if (!normalizedHandle) return false
+  const slug = normalizedHandle.slice(1)
+  const escapedSlug = slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const pattern = new RegExp(
+    `<a[^>]+class="[^"]*\\buser-mention\\b[^"]*"[^>]*>(?:@${escapedSlug})<\\/a>`,
+    "i"
+  )
+  return pattern.test(html)
+}
+
+export function githubAppSlugMatchesHandle(appSlug: string | undefined, handle: string): boolean {
+  const normalizedSlug = normalizeHandle(appSlug)
+  const normalizedHandle = normalizeHandle(handle)
+  if (!normalizedSlug || !normalizedHandle) return false
+  return normalizedSlug === normalizedHandle
 }
 
 function normalizeHandle(value: string | undefined): string | null {

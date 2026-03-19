@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest"
 import {
   botLoginMatchesExpected,
+  githubAppSlugMatchesHandle,
   issueLinkMentioned,
   normalizeBotLogins,
+  renderedHtmlHasHandleUserMentionLink,
   textStartsWithHandle,
   textMentionsUrl,
   verifyKnowledgeResponse
@@ -93,5 +95,29 @@ describe("textStartsWithHandle", () => {
   it("requires the real GitHub App handle at the start of the command", () => {
     expect(textStartsWithHandle("@codexengineer run fix the bug", "@codexengineer")).toBe(true)
     expect(textStartsWithHandle("@OpenCodeEvalApp run fix the bug", "@opencodeengineer")).toBe(false)
+  })
+})
+
+describe("renderedHtmlHasHandleUserMentionLink", () => {
+  it("detects rendered user-mention links", () => {
+    expect(renderedHtmlHasHandleUserMentionLink('<p><a class="user-mention" href="/codexengineer">@codexengineer</a></p>', "@codexengineer")).toBe(true)
+  })
+
+  it("does not treat plain handle text as a rendered mention link", () => {
+    expect(renderedHtmlHasHandleUserMentionLink("<p>@opencodebridgeapp run it</p>", "@opencodebridgeapp")).toBe(false)
+  })
+
+  it("does not match a different mention in the same html", () => {
+    expect(renderedHtmlHasHandleUserMentionLink('<p><a class="user-mention" href="/someoneelse">@someoneelse</a></p>', "@opencodebridgeapp")).toBe(false)
+  })
+})
+
+describe("githubAppSlugMatchesHandle", () => {
+  it("matches the performed_via slug to the expected handle", () => {
+    expect(githubAppSlugMatchesHandle("opencodebridgeapp", "@opencodebridgeapp")).toBe(true)
+  })
+
+  it("rejects mismatched app slugs", () => {
+    expect(githubAppSlugMatchesHandle("codexengineer", "@opencodebridgeapp")).toBe(false)
   })
 })

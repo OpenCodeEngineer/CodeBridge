@@ -8,8 +8,10 @@ import Database from "better-sqlite3"
 import { Pool } from "pg"
 import {
   botLoginMatchesExpected,
+  githubAppSlugMatchesHandle,
   issueLinkMentioned,
   normalizeBotLogins,
+  renderedHtmlHasHandleUserMentionLink,
   textMentionsUrl,
   textStartsWithHandle,
   verifyKnowledgeResponse,
@@ -62,13 +64,17 @@ type IssueCommentRef = {
   id: number
   url: string
   body: string
+  bodyHtml?: string
 }
 
 type BotComment = {
   id: number
   body: string
+  body_html?: string
+  html_url?: string
   created_at: string
   user?: { login?: string }
+  performed_via_github_app?: { slug?: string }
 }
 
 type LinkedPr = {
@@ -133,6 +139,7 @@ type CaseCollected = {
   appHandle: string
   triggerCommentUrl: string
   triggerCommentUsesExpectedHandle: boolean
+  triggerCommentRenderedMentionLink: boolean
   expectedBackend: AgentBackend
   expectedAppKey: string
   expectedBotLogin: string
@@ -144,6 +151,8 @@ type CaseCollected = {
   botCommentUrls: string[]
   botCommentAuthorLogins: string[]
   botCommentAuthorsMatchExpected: boolean
+  botCommentPerformedViaGithubAppSlugs: string[]
+  botCommentPerformedViaExpectedApp: boolean
   latestBotCommentUrl?: string
   botResponse: string
   labels: string[]
@@ -300,6 +309,16 @@ function createIssue(repo: string, title: string, body: string): IssueRef {
   return { number, url }
 }
 
+function getIssueComment(repo: string, commentId: number): BotComment {
+  const raw = gh([
+    "api",
+    `repos/${repo}/issues/comments/${commentId}`,
+    "-H",
+    "Accept: application/vnd.github.full+json"
+  ])
+  return JSON.parse(raw) as BotComment
+}
+
 function postIssueComment(repo: string, issueNumber: number, body: string): IssueCommentRef {
   const result = spawnSync(
     "gh",
@@ -319,18 +338,25 @@ function postIssueComment(repo: string, issueNumber: number, body: string): Issu
   }
   const parsed = JSON.parse((result.stdout || "").trim()) as { id?: number; html_url?: string }
   const id = Number(parsed.id)
-  const url = parsed.html_url ?? `https://github.com/${repo}/issues/${issueNumber}`
-  const commentBody = typeof (parsed as { body?: string }).body === "string"
-    ? (parsed as { body?: string }).body ?? ""
-    : ""
   if (!id) {
     throw new Error(`gh issue comment returned invalid response: ${(result.stdout || "").trim()}`)
   }
-  return { id, url, body: commentBody }
+  const comment = getIssueComment(repo, id)
+  return {
+    id,
+    url: comment.html_url ?? parsed.html_url ?? `https://github.com/${repo}/issues/${issueNumber}`,
+    body: comment.body ?? body,
+    bodyHtml: comment.body_html
+  }
 }
 
 function listIssueComments(repo: string, issueNumber: number): BotComment[] {
-  const raw = gh(["api", `repos/${repo}/issues/${issueNumber}/comments?per_page=100`])
+  const raw = gh([
+    "api",
+    `repos/${repo}/issues/${issueNumber}/comments?per_page=100`,
+    "-H",
+    "Accept: application/vnd.github.full+json"
+  ])
   return JSON.parse(raw) as BotComment[]
 }
 
@@ -824,7 +850,8 @@ function buildEvalTests(results: CaseCollected[]) {
           "const obj = JSON.parse(output);",
           "return Array.isArray(obj.botCommentAuthorLogins)",
           "&& obj.botCommentAuthorLogins.length > 0",
-          "&& obj.botCommentAuthorsMatchExpected === true;"
+          "&& obj.botCommentAuthorsMatchExpected === true",
+          "&& obj.botCommentPerformedViaExpectedApp === true;"
         ].join("\n")
       },
       {
@@ -926,6 +953,12 @@ function assertCollectedIdentityEvidence(results: CaseCollected[]) {
     if (!entry.botCommentAuthorsMatchExpected || entry.botCommentAuthorLogins.length === 0) {
       throw new Error(
         `Hard-gate eval requires issue-thread replies from ${entry.expectedBotLogin} for ${entry.caseId}, got ${entry.botCommentAuthorLogins.join(", ") || "none"}.`
+      )
+    }
+
+    if (!entry.botCommentPerformedViaExpectedApp || entry.botCommentPerformedViaGithubAppSlugs.length === 0) {
+      throw new Error(
+        `Hard-gate eval requires performed_via_github_app evidence for ${entry.caseId}, got ${entry.botCommentPerformedViaGithubAppSlugs.join(", ") || "none"}.`
       )
     }
 
@@ -1045,6 +1078,8 @@ function writeMarkdownReport(input: {
     lines.push(`- Issue: ${entry.issueUrl}`)
     if (entry.latestBotCommentUrl) lines.push(`- Final bot comment: ${entry.latestBotCommentUrl}`)
     lines.push(`- Expected backend/app: ${entry.expectedBackend} / ${entry.expectedAppKey}`)
+    lines.push(`- Trigger handle evidence: startsWithHandle=${entry.triggerCommentUsesExpectedHandle}, renderedUserMentionLink=${entry.triggerCommentRenderedMentionLink}`)
+    lines.push(`- Bot app provenance: authors=${entry.botCommentAuthorLogins.join(", ") || "none"}, performedVia=${entry.botCommentPerformedViaGithubAppSlugs.join(", ") || "none"}, matchesExpected=${entry.botCommentPerformedViaExpectedApp}`)
     lines.push(`- DB run: ${entry.dbRun ? `${entry.dbRun.id} (${entry.dbRun.status}, backend=${entry.dbRun.backend}, appKey=${entry.dbRun.githubAppKey ?? "n/a"})` : "missing"}`)
     if (entry.workspaceVerification) {
       lines.push(`- Workspace path: ${entry.workspaceVerification.repoPath}`)
@@ -1124,6 +1159,11 @@ async function main() {
         .map(comment => comment.user?.login?.trim())
         .filter((value): value is string => Boolean(value))
     )]
+    const botCommentPerformedViaGithubAppSlugs = [...new Set(
+      bot.comments
+        .map(comment => comment.performed_via_github_app?.slug?.trim().toLowerCase())
+        .filter((value): value is string => Boolean(value))
+    )]
     const latestBotCommentUrl = botCommentUrls[botCommentUrls.length - 1]
     const linkedPrAuthorMatchesExpectedBot = linkedPr?.url
       ? botLoginMatchesExpected(prDetails?.authorLogin, missionCase.botLogins)
@@ -1137,6 +1177,7 @@ async function main() {
       appHandle: missionCase.appHandle,
       triggerCommentUrl: triggerComment.url,
       triggerCommentUsesExpectedHandle: textStartsWithHandle(triggerComment.body || commandBody, missionCase.appHandle),
+      triggerCommentRenderedMentionLink: renderedHtmlHasHandleUserMentionLink(triggerComment.bodyHtml, missionCase.appHandle),
       expectedBackend: missionCase.expectedBackend,
       expectedAppKey: missionCase.appKey,
       expectedBotLogin: missionCase.expectedBotLogin,
@@ -1150,6 +1191,10 @@ async function main() {
       botCommentAuthorsMatchExpected:
         botCommentAuthorLogins.length > 0
         && botCommentAuthorLogins.every(login => botLoginMatchesExpected(login, missionCase.botLogins)),
+      botCommentPerformedViaGithubAppSlugs,
+      botCommentPerformedViaExpectedApp:
+        bot.comments.length > 0
+        && bot.comments.every(comment => githubAppSlugMatchesHandle(comment.performed_via_github_app?.slug, missionCase.appHandle)),
       latestBotCommentUrl,
       botResponse: bot.combined,
       labels,
