@@ -1,6 +1,7 @@
 import { createHmac, randomUUID } from "node:crypto"
 import { readdirSync, statSync } from "node:fs"
 import path from "node:path"
+import { pathToFileURL } from "node:url"
 import { execa } from "execa"
 import { loadConfig, loadEnv } from "../src/config.js"
 import { resolveDefaultGithubCommandPrefixes } from "../src/command-prefixes.js"
@@ -1222,7 +1223,13 @@ const main = async () => {
   }
 }
 
-main().catch(error => {
-  console.error(error instanceof Error ? error.message : String(error))
-  process.exit(1)
-})
+const isMain = process.argv[1]
+  ? import.meta.url === pathToFileURL(process.argv[1]).href
+  : false
+
+if (isMain) {
+  main().catch(error => {
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exit(1)
+  })
+}
