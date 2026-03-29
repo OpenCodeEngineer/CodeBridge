@@ -106,6 +106,7 @@ const main = async () => {
 
     app.post("/codex/notify", createCodexNotifyHandler({
       config,
+      store,
       githubApps: secrets.githubApps,
       ingestToken: secrets.codexNotifyToken
     }))

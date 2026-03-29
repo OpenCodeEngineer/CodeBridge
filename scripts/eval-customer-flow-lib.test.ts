@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest"
 import {
   botLoginMatchesExpected,
   githubAppSlugMatchesHandle,
+  isExpectedGithubAppProofArtifact,
+  isOperatorSummaryArtifact,
   issueLinkMentioned,
   normalizeBotLogins,
   renderedHtmlHasHandleUserMentionLink,
@@ -67,6 +69,14 @@ describe("botLoginMatchesExpected", () => {
     expect(botLoginMatchesExpected("app/codexengineer", "codexengineer[bot]")).toBe(true)
   })
 
+  it("rejects a plain human-style login for an app bot expectation", () => {
+    expect(botLoginMatchesExpected("codexengineer", "codexengineer[bot]")).toBe(false)
+  })
+
+  it("rejects arbitrary human accounts even if the handle text matches the slug", () => {
+    expect(botLoginMatchesExpected("opencodeappbridge", "opencodeappbridge[bot]")).toBe(false)
+  })
+
   it("rejects different GitHub App authors", () => {
     expect(botLoginMatchesExpected("codexengineer[bot]", "opencodeengineer[bot]")).toBe(false)
   })
@@ -96,11 +106,24 @@ describe("textStartsWithHandle", () => {
     expect(textStartsWithHandle("@codexengineer run fix the bug", "@codexengineer")).toBe(true)
     expect(textStartsWithHandle("@OpenCodeEvalApp run fix the bug", "@opencodeengineer")).toBe(false)
   })
+
+  it("treats a bootstrap mention as starting with the real handle", () => {
+    expect(textStartsWithHandle("@opencodeappbridge, please work on it.", "@opencodeappbridge")).toBe(true)
+  })
 })
 
 describe("renderedHtmlHasHandleUserMentionLink", () => {
   it("detects rendered user-mention links", () => {
     expect(renderedHtmlHasHandleUserMentionLink('<p><a class="user-mention" href="/codexengineer">@codexengineer</a></p>', "@codexengineer")).toBe(true)
+  })
+
+  it("accepts GitHub App mention rendering as plain text in body_html", () => {
+    expect(
+      renderedHtmlHasHandleUserMentionLink(
+        '<p dir="auto">@codexengineer, please work on it.</p>',
+        "@codexengineer"
+      )
+    ).toBe(true)
   })
 
   it("does not treat plain handle text as a rendered mention link", () => {
@@ -119,5 +142,42 @@ describe("githubAppSlugMatchesHandle", () => {
 
   it("rejects mismatched app slugs", () => {
     expect(githubAppSlugMatchesHandle("codexengineer", "@opencodebridgeapp")).toBe(false)
+  })
+})
+
+
+describe("isExpectedGithubAppProofArtifact", () => {
+  it("accepts app-authored proof artifacts with matching performed_via evidence", () => {
+    expect(isExpectedGithubAppProofArtifact({
+      authorLogin: "opencodeappbridge[bot]",
+      expectedBotLogin: "opencodeappbridge[bot]",
+      performedViaAppSlug: "opencodeappbridge",
+      expectedHandle: "@opencodeappbridge"
+    })).toBe(true)
+  })
+
+  it("rejects operator-authored summary comments as proof artifacts", () => {
+    expect(isExpectedGithubAppProofArtifact({
+      authorLogin: "OpenCodeEngineer",
+      expectedBotLogin: "opencodeappbridge[bot]",
+      performedViaAppSlug: undefined,
+      expectedHandle: "@opencodeappbridge"
+    })).toBe(false)
+  })
+})
+
+describe("isOperatorSummaryArtifact", () => {
+  it("flags human-authored status comments without app provenance", () => {
+    expect(isOperatorSummaryArtifact({
+      authorLogin: "OpenCodeEngineer",
+      performedViaAppSlug: undefined
+    })).toBe(true)
+  })
+
+  it("does not flag app-authored proof artifacts as operator summaries", () => {
+    expect(isOperatorSummaryArtifact({
+      authorLogin: "opencodeappbridge[bot]",
+      performedViaAppSlug: "opencodeappbridge"
+    })).toBe(false)
   })
 })

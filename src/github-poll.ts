@@ -9,7 +9,14 @@ import {
   resolveGithubAppIdentity
 } from "./command-prefixes.js"
 import { routeDiscussionCommentCommand, routeExplicitGitHubCommand, routeIssueCommentCommand } from "./github-routing.js"
-import { postControlAck, postDiscussionUnsupportedControl, postIssueStatus } from "./github-controls.js"
+import {
+  formatTenantErrorComment,
+  postControlAck,
+  postDiscussionTenantError,
+  postDiscussionUnsupportedControl,
+  postIssueStatus,
+  postReviewPromptMirrorIfMissing
+} from "./github-controls.js"
 import { resolveRepo } from "./repo.js"
 import { logger } from "./logger.js"
 import { dispatchSessionRelay, resolveSessionIdFromIssue } from "./codex-session-relay.js"
@@ -79,11 +86,15 @@ export function startGitHubPolling(params: {
     if (running) return
     running = true
     try {
+      logger.debug({ appCount: appRuntimes.length, tenantCount: config.tenants.length }, "GitHub poll tick started")
       for (const appRuntime of appRuntimes) {
         for (const tenant of config.tenants) {
           const githubBinding = getTenantGithubAppBinding(tenant, appRuntime.appKey)
           const installationId = githubBinding?.installationId
-          if (!installationId) continue
+          if (!installationId) {
+            logger.debug({ tenantId: tenant.id, appKey: appRuntime.appKey }, "Skipping tenant: no installationId")
+            continue
+          }
 
           const client = await withTimeout(
             getClient(appRuntime.appKey, installationId),
@@ -100,6 +111,7 @@ export function startGitHubPolling(params: {
           })
           if (!client) continue
 
+          logger.debug({ tenantId: tenant.id, appKey: appRuntime.appKey, installationId, repoCount: tenant.repos.length }, "Polling tenant repos")
           for (const tenantRepo of tenant.repos) {
             const repo = resolveRepo(tenant, tenantRepo.fullName, appRuntime.appKey)
             if (!repo) continue
@@ -162,6 +174,7 @@ export function startGitHubPolling(params: {
     })
 
     await pollDiscussionComments({
+      config,
       appKey: appRuntime.appKey,
       configuredPrefixes: appRuntime.configuredPrefixes,
       githubBinding,
@@ -292,6 +305,14 @@ export function startGitHubPolling(params: {
           prefixes,
           issueManaged: issueMeta.managed
         })
+        logger.debug({
+          commentId: comment.id,
+          issueNumber,
+          managed: issueMeta.managed,
+          commandType: command?.type ?? null,
+          commandExplicit: command?.explicit ?? null,
+          repoFullName
+        }, "Processing issue comment")
         if (!command) continue
 
         const managedIssueOwnedByApp = issueMeta.managed
@@ -303,6 +324,14 @@ export function startGitHubPolling(params: {
             appKey: appRuntime.appKey
           })
           : false
+        logger.debug({
+          commentId: comment.id,
+          issueNumber,
+          managed: issueMeta.managed,
+          ownedByApp: managedIssueOwnedByApp,
+          commandType: command.type,
+          explicit: command.explicit
+        }, "Managed issue ownership check")
         if (issueMeta.managed && !command.explicit && !managedIssueOwnedByApp) continue
 
         if (command.tenantHint) {
@@ -315,22 +344,14 @@ export function startGitHubPolling(params: {
             const isValidHint = allGithubTenants.some(t => t.id.toLowerCase() === hintLower)
 
             if (!isValidHint) {
-              const tenantList = validTenantIds.length > 0
-                ? validTenantIds.map(id => `- \`@${id}\``).join("\n")
-                : "_(No GitHub-enabled tenants configured)_"
-
               await client.octokit.issues.createComment({
                 owner,
                 repo: repoName,
                 issue_number: issueNumber,
-                body: `❌ **Tenant Resolution Failed**
-
-Tenant \`${command.tenantHint}\` not found or not configured for GitHub App \`${appRuntime.appKey}\`.
-
-**Valid tenant IDs for this repository:**
-${tenantList}
-
-To specify a tenant, use: \`@tenant-id your command here\``
+                body: formatTenantErrorComment(
+                  `Tenant \`${command.tenantHint}\` not found or not configured for GitHub App \`${appRuntime.appKey}\`.`,
+                  validTenantIds
+                )
               })
             }
             continue
@@ -363,6 +384,12 @@ To specify a tenant, use: \`@tenant-id your command here\``
 
         if (managedIssueOwnedByApp && command.type === "reply") {
           const sessionId = await getIssueSessionId(issueNumber, issueMeta.body)
+          logger.info({
+            commentId: comment.id,
+            issueNumber,
+            sessionId,
+            repoFullName
+          }, "Session relay candidate")
           if (sessionId) {
             const relay = dispatchSessionRelay({
               sessionId,
@@ -592,6 +619,7 @@ async function pollAssignedIssues(input: {
 }
 
 async function pollDiscussionComments(input: {
+  config: AppConfig
   appKey: string
   configuredPrefixes?: string[]
   githubBinding: NonNullable<TenantConfig["github"]>["apps"][number]
@@ -740,14 +768,36 @@ async function pollDiscussionComments(input: {
         prefixes
       })
       if (!command) continue
-      if (command.tenantHint && command.tenantHint.toLowerCase() !== input.tenant.id.toLowerCase()) continue
+      if (command.tenantHint) {
+        const hintLower = command.tenantHint.toLowerCase()
+        const tenantMatches = hintLower === input.tenant.id.toLowerCase()
+        if (!tenantMatches) {
+          const allGithubTenants = input.config.tenants.filter(tenant => getTenantGithubAppBinding(tenant, input.appKey))
+          const validTenantIds = allGithubTenants.map(tenant => tenant.id)
+          const isValidHint = allGithubTenants.some(tenant => tenant.id.toLowerCase() === hintLower)
+
+          if (!isValidHint && input.tenant.id.toLowerCase() === (allGithubTenants[0]?.id.toLowerCase() ?? "")) {
+            await postDiscussionTenantError({
+              owner: input.owner,
+              repo: input.repoName,
+              discussionNumber: comment.discussionNumber,
+              client: input.client,
+              error: `Tenant \`${command.tenantHint}\` not found or not configured for GitHub App \`${input.appKey}\`.`,
+              validTenantIds,
+              sourceCommentId: comment.commentId
+            })
+          }
+          continue
+        }
+      }
 
       if (command.type === "pause" || command.type === "resume" || command.type === "status") {
         await postDiscussionUnsupportedControl({
           owner: input.owner,
           repo: input.repoName,
           discussionNumber: comment.discussionNumber,
-          client: input.client
+          client: input.client,
+          sourceCommentId: comment.commentId
         })
         continue
       }
@@ -969,6 +1019,16 @@ async function pollPullRequestReviewComments(input: {
       })
       if (!command) continue
 
+      await postReviewPromptMirrorIfMissing({
+        owner: input.owner,
+        repo: input.repoName,
+        issueNumber,
+        triggerCommentId: comment.id,
+        originalCommentBody: body,
+        authorLogin,
+        client: input.client
+      })
+
       const managedIssueOwnedByApp = issueMeta.managed
         ? await isManagedIssueOwnedByApp({
           store: input.store,
@@ -989,22 +1049,14 @@ async function pollPullRequestReviewComments(input: {
           const isValidHint = allGithubTenants.some(tenant => tenant.id.toLowerCase() === hintLower)
 
           if (!isValidHint) {
-            const tenantList = validTenantIds.length > 0
-              ? validTenantIds.map(id => `- \`@${id}\``).join("\n")
-              : "_(No GitHub-enabled tenants configured)_"
-
             await input.client.octokit.issues.createComment({
               owner: input.owner,
               repo: input.repoName,
               issue_number: issueNumber,
-              body: `❌ **Tenant Resolution Failed**
-
-Tenant \`${command.tenantHint}\` not found or not configured for GitHub App \`${input.appKey}\`.
-
-**Valid tenant IDs for this repository:**
-${tenantList}
-
-To specify a tenant, use: \`@tenant-id your command here\``
+              body: formatTenantErrorComment(
+                `Tenant \`${command.tenantHint}\` not found or not configured for GitHub App \`${input.appKey}\`.`,
+                validTenantIds
+              )
             })
           }
           continue

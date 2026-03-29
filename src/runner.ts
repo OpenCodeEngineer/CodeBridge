@@ -709,7 +709,7 @@ function resolveCodexModelReasoningEffort(model: string | undefined): "low" | "m
   if (normalized.includes("codex")) {
     return DEFAULT_GPT5_CODEX_REASONING_EFFORT
   }
-  if (normalized === "gpt-5.4-pro") {
+  if (normalized.startsWith("gpt-5.4-pro")) {
     return "medium"
   }
   return undefined

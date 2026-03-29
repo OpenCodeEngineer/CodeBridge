@@ -1,7 +1,9 @@
 import type { RequestHandler } from "express"
+import { nanoid } from "nanoid"
 import type { InstallationClient } from "./github-auth.js"
 import { syncIssueLifecycleState } from "./github-issue-state.js"
 import type { AppConfig, GitHubContext } from "./types.js"
+import type { RunStore } from "./storage.js"
 import { findTenantRepoByFullName, findTenantRepoByGitRemote, findTenantRepoByPath, type TenantRepoMatch } from "./repo.js"
 import { parseIssueReference } from "./commands.js"
 import { logger } from "./logger.js"
@@ -34,10 +36,11 @@ type NormalizedTurn = {
 
 export function createCodexNotifyHandler(params: {
   config: AppConfig
+  store: RunStore
   githubApps?: GitHubAppMap
   ingestToken?: string
 }): RequestHandler {
-  const { config, githubApps, ingestToken } = params
+  const { config, store, githubApps, ingestToken } = params
   const sessionBindings = new Map<string, SessionBinding>()
   const getClient = githubApps ? createGitHubInstallationClientFactory(githubApps, CLIENT_TTL_MS) : null
 
@@ -85,6 +88,41 @@ export function createCodexNotifyHandler(params: {
         repoPath: binding.repoPath,
         github
       })
+
+      // Persist a run record so the polling path (isManagedIssueOwnedByApp) can
+      // recognize this issue as owned by the correct GitHub App.  Without this,
+      // store.getLatestRunForIssue() returns null and follow-up comments on
+      // notify-created issues are silently skipped.
+      if (github.issueNumber) {
+        const sourceKey = `codex-notify:${normalized.sessionId}`
+        try {
+          const runId = nanoid(8)
+          await store.createRun({
+            id: runId,
+            tenantId: repoMatch.tenant.id,
+            repoFullName: binding.repoFullName,
+            repoPath: binding.repoPath,
+            sourceKey,
+            prompt: normalized.inputMessages.join("\n\n") || "Codex session",
+            backend: "codex",
+            github
+          })
+          // Mark as completed immediately — the actual work is handled by the
+          // external Codex session, not by our queue worker.
+          await store.updateRunStatus(runId, "succeeded")
+          logger.info({
+            runId,
+            sessionId: normalized.sessionId,
+            repoFullName: binding.repoFullName,
+            issueNumber: github.issueNumber,
+            appKey: github.appKey
+          }, "Codex notify: persisted run record for issue ownership tracking")
+        } catch (error) {
+          // If the sourceKey already exists (duplicate session), that's fine —
+          // the ON CONFLICT clause in createRun returns the existing row.
+          logger.debug({ err: error, sourceKey }, "Codex notify: run record creation note")
+        }
+      }
 
       if (!getClient) {
         throw new Error("GitHub app credentials are required for Codex notify integration")

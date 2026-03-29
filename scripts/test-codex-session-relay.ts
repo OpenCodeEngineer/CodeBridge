@@ -94,7 +94,7 @@ const main = async () => {
   const relayToken = `RELAY_REPLY_OK_${Date.now()}`
   const codexExecutable = args.codexPath ?? env.codexPath ?? "codex"
 
-  const bootstrap = await execa(codexExecutable, ["exec", "--json", "Reply with exactly RELAY_BOOTSTRAP_OK"], {
+  const bootstrap = await execa(codexExecutable, ["exec", "--json", "-c", 'model_reasoning_effort="medium"', "Reply with exactly RELAY_BOOTSTRAP_OK"], {
     cwd: repoMatch.repo.path,
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 300_000,

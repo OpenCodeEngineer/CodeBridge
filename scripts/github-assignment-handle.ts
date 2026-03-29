@@ -47,7 +47,9 @@ async function loadConfiguredAssignmentHandles(repoFullName: string): Promise<st
     const env = loadEnv()
     const config = await loadConfig(env.configPath)
     const match = findTenantRepoByFullName(config, repoFullName)
-    return (match?.tenant.github?.assignmentAssignees ?? []).map(normalizeHandle)
+    const apps = match?.tenant.github?.apps ?? []
+    const handles = apps.flatMap(app => app.assignmentAssignees ?? [])
+    return handles.map(normalizeHandle)
   } catch {
     return []
   }
